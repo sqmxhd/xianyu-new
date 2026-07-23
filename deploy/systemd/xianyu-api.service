@@ -1,0 +1,17 @@
+[Unit]
+Description=Xianyu Admin API
+After=network-online.target mysql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/xianyu
+EnvironmentFile=/etc/xianyu/xianyu.env
+ExecStart=/opt/xianyu/.venv/bin/uvicorn apps.api.xianyu_admin_api.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers
+Restart=always
+RestartSec=5
+User=xianyu
+Group=xianyu
+
+[Install]
+WantedBy=multi-user.target

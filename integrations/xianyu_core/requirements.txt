@@ -1,0 +1,16 @@
+# Phase-1 runtime dependencies for the Xianyu core adapter.
+#
+# websockets 16+ is used because it supports explicit per-connection proxy=
+# configuration. SOCKS support requires python-socks[asyncio].
+websockets>=16,<17
+python-socks[asyncio]>=2.0.0
+
+# XianYuApis upstream dependencies. The upstream requirements file is
+# incomplete for direct use, so the adapter documents the effective runtime set.
+requests[socks]>=2.31.0
+loguru>=0.7.0
+PyExecJS>=1.5.1
+blackboxprotobuf>=1.0.1
+pydantic>=2.5.0
+typing-extensions>=4.8.0
+Pillow>=10.4,<12

@@ -1,0 +1,5 @@
+downloads/*
+releases/*
+active.json
+!downloads/.gitkeep
+!releases/.gitkeep

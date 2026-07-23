@@ -1,0 +1,17 @@
+[Unit]
+Description=Xianyu Admin Queue Worker
+After=network-online.target mysql.service redis.service xianyu-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/xianyu
+EnvironmentFile=/etc/xianyu/xianyu.env
+ExecStart=/opt/xianyu/.venv/bin/python -m apps.api.xianyu_admin_api.worker
+Restart=always
+RestartSec=5
+User=xianyu
+Group=xianyu
+
+[Install]
+WantedBy=multi-user.target

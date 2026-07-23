@@ -1,0 +1,17 @@
+.venv/
+.env
+.env.local
+.env.production
+.env.*.local
+data/
+__pycache__/
+*.py[cod]
+*.log
+
+node_modules/
+apps/admin/node_modules/
+apps/admin/dist/
+apps/admin/*.tsbuildinfo
+apps/admin/vite.config.d.ts
+apps/admin/vite.config.js
+artifacts/

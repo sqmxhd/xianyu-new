@@ -1,0 +1,21 @@
+https://github.com/zhinianboke/xianyu-auto-reply
+https://github.com/cv-cat/XianYuApis
+https://github.com/shaxiu/XianyuAutoAgent
+https://github.com/Kaguya233qwq/myfish
+
+https://github.com/GuDong2003/xianyu-auto-reply-fix
+
+淘宝
+https://github.com/cv-cat/TaoBaoApis
+
+
+# https://h5.m.goofish.com/app/idleFish-F2e/business-user-backend/welcome  咸鱼小店开通链接
+
+
+
+
+netsh interface portproxy add v4tov4   listenaddress=0.0.0.0   listenport=9524   connectaddress=127.0.0.1   connectport=9223
+netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=9524
+192.168.7.39:9524
+
+codex resume 019f857e-ef68-72a2-8405-aa58fba98dc7
