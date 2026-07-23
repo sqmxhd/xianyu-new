@@ -5,7 +5,8 @@ This package is the project-owned adapter boundary around `third_party/XianYuApi
 Rules:
 
 - Do not import `third_party/XianYuApis` directly from business modules.
-- Do not modify upstream files in `third_party/XianYuApis`.
+- Keep business changes out of `third_party/XianYuApis`; the directory is a
+  vendored upstream snapshot with only declared compatibility overrides.
 - Add proxy handling, lifecycle management, message normalization, retries, and persistence integration here.
 - Only SOCKS5/SOCKS5h proxies are supported. Prefer `socks5h` so DNS resolution goes through the proxy.
 
@@ -39,18 +40,18 @@ the long-running IM session.
 
 ## Updating upstream
 
-Inspect current upstream checkout:
+Inspect the current vendored source:
 
 ```bash
 npm run upstream:status
 ```
 
-Fast-forward update when the upstream checkout is clean:
+Copy the latest official source into the parent working tree:
 
 ```bash
 npm run upstream:update
 ```
 
-The updater refuses to run if `third_party/XianYuApis` has local changes. Keep
-all local integration code in this adapter instead of editing upstream files
-directly.
+The updater refuses to run if the vendor source has uncommitted changes and
+never creates an independent commit. Review its parent-repository diff and
+commit it on `main` with the rest of the project changes.

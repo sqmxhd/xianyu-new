@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/cv-cat/XianYuApis.git",
+  "branch": "master",
+  "commit": "fd01fb682d32829177a0691c3ce6156bb0945a9a",
+  "overrides": [
+    "utils/package.json"
+  ]
+}

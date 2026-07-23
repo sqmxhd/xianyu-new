@@ -50,8 +50,7 @@ def main() -> int:
 
     upstream_git = ROOT / "third_party" / "XianYuApis" / ".git"
     if upstream_git.exists():
-        print("notice: third_party/XianYuApis is a nested git checkout.")
-        print("        Prefer a submodule/subtree decision before committing it in the parent repo.")
+        violations.append("third_party/XianYuApis/.git")
 
     if violations:
         print("forbidden staged files:")

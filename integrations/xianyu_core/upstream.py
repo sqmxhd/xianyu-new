@@ -1,6 +1,6 @@
 """Isolated loader for upstream XianYuApis helpers.
 
-XianYuApis is intentionally stored as an unmodified upstream tree under
+XianYuApis is pinned as vendored source under
 ``third_party/XianYuApis``. It uses top-level module names such as ``utils`` and
 ``message``; this loader imports only the required symbols and restores any
 pre-existing modules with the same names afterwards.

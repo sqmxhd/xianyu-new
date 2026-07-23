@@ -33,16 +33,15 @@ git status --short --ignored
    - `tools/update_xianyu_apis.py`
    - `tools/git_audit.py`
 
-5. Upstream source decision
+5. Upstream source
    - `third_party/XianYuApis`
+   - `third_party/XianYuApis.vendor.json`
 
-## Upstream decision
+## Upstream policy
 
-`third_party/XianYuApis` is currently a nested git checkout. Before committing it
-to the parent repository, choose one:
+`third_party/XianYuApis` is vendored directly into the parent repository. The
+source commit is recorded in `third_party/XianYuApis.vendor.json`. Official
+upstream refreshes and project compatibility changes remain ordinary parent
+working-tree changes and are committed on `main` together.
 
-- submodule: keeps upstream history clean and updates explicit;
-- subtree/vendor copy: easier clone, but upstream history is folded into parent;
-- do not commit upstream: require a bootstrap script to clone it during setup.
-
-The current adapter is designed so business code does not modify upstream files.
+Business integration code remains under `integrations/xianyu_core`.

@@ -1,8 +1,8 @@
 """Internal adapter boundary for the Xianyu messaging core.
 
-The code in this package is owned by this project. Upstream protocol code
-under ``third_party/XianYuApis`` should stay unmodified so it can be refreshed
-from GitHub without merge conflicts.
+The code in this package is owned by this project. XianYuApis is vendored under
+``third_party/XianYuApis`` and updated through ordinary parent-repository
+changes, while business integration code remains here.
 """
 
 from .models import (
