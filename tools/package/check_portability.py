@@ -9,6 +9,39 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def cache_key_file_counts(content: str) -> list[tuple[str, int]]:
+    """Return GitLab jobs whose cache key tracks more than two files."""
+
+    lines = content.splitlines()
+    keys_by_indent: dict[int, str] = {}
+    results: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        matched = re.match(r"^(\s*)([A-Za-z0-9_.:-]+):(?:\s+.*)?$", line)
+        if not matched:
+            continue
+        indent = len(matched.group(1))
+        key = matched.group(2)
+        for existing_indent in tuple(keys_by_indent):
+            if existing_indent >= indent:
+                keys_by_indent.pop(existing_indent)
+        keys_by_indent[indent] = key
+        path = [keys_by_indent[level] for level in sorted(keys_by_indent)]
+        if path[-3:] != ["cache", "key", "files"]:
+            continue
+        count = 0
+        for child in lines[index + 1 :]:
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= indent:
+                break
+            if re.match(r"^\s*-\s+\S", child):
+                count += 1
+        if count > 2:
+            results.append((path[0], count))
+    return results
+
+
 def main() -> int:
     failures: list[str] = []
     allowed = {
@@ -37,8 +70,14 @@ def main() -> int:
 
     stage_names = {"test", "binary", "docker"}
     for path in (ROOT / ".gitlab" / "ci").glob("*.yml"):
+        content = path.read_text(encoding="utf-8")
+        for job_name, count in cache_key_file_counts(content):
+            failures.append(
+                f"{path.relative_to(ROOT)} {job_name}.cache.key.files "
+                f"has {count} items; GitLab allows at most 2"
+            )
         for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(),
+            content.splitlines(),
             start=1,
         ):
             matched = re.match(r"^([A-Za-z0-9][A-Za-z0-9:_-]*):\s*$", line)

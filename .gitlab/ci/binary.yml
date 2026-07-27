@@ -13,7 +13,6 @@ linux-x64:
       files:
         - apps/api/requirements.txt
         - integrations/xianyu_core/requirements.txt
-        - tools/package/requirements.txt
     paths:
       - .cache/pip/
     policy: pull-push
