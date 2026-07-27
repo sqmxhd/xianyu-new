@@ -50,15 +50,11 @@ The GitLab server and registry are HTTPS-only. Do not add
 `--insecure-registry`, `GIT_SSL_NO_VERIFY`, `http = true`, or
 `insecure = true`.
 
-Install the internal root CA on both runner hosts. Configure GitLab Runner with
-the same CA through `tls-ca-file`, and expose it to the Docker executor helper
-as `/etc/gitlab-runner/certs/ca.crt`. Restart GitLab Runner and Docker after
-changing their trust stores.
-
-CI job images and Dockerfile base images use
-`CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX`. BuildKit receives
-`CI_SERVER_TLS_CA_FILE` as an explicit CA for both `CI_REGISTRY` and
-`CI_DEPENDENCY_PROXY_SERVER`.
+Internal CA trust is owned by GitLab Runner and the Docker executor. CI jobs do
+not copy certificates, mutate a container trust store, or consume runner
+certificate variables. CI job images and Dockerfile base images use
+`CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX`; the runner-provided trust applies to
+the registry and dependency proxy.
 
 The GitLab image dependency proxy is separate from npm and PyPI dependency
 handling. npm and Python dependencies use their lock/requirements files and

@@ -14,7 +14,7 @@
       test -n "${CI_REGISTRY:-}"
       test -n "${CI_DEPENDENCY_PROXY_SERVER:-}"
       test -n "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX:-}"
-      mkdir -p "$HOME/.docker" "$HOME/.config/buildkit/certs"
+      mkdir -p "$HOME/.docker"
 
       registry_auth="$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')"
       proxy_auth="$(printf '%s:%s' "$CI_DEPENDENCY_PROXY_USER" "$CI_DEPENDENCY_PROXY_PASSWORD" | base64 | tr -d '\n')"
@@ -22,22 +22,6 @@
         "$CI_REGISTRY" "$registry_auth" \
         "$CI_DEPENDENCY_PROXY_SERVER" "$proxy_auth" \
         > "$HOME/.docker/config.json"
-
-      if [ -n "${CI_SERVER_TLS_CA_FILE:-}" ] && [ -f "$CI_SERVER_TLS_CA_FILE" ]; then
-        registry_cert_dir="$HOME/.config/buildkit/certs/$CI_REGISTRY"
-        proxy_cert_dir="$HOME/.config/buildkit/certs/$CI_DEPENDENCY_PROXY_SERVER"
-        mkdir -p "$registry_cert_dir" "$proxy_cert_dir"
-        cp "$CI_SERVER_TLS_CA_FILE" "$registry_cert_dir/ca.pem"
-        cp "$CI_SERVER_TLS_CA_FILE" "$proxy_cert_dir/ca.pem"
-        {
-          printf '[registry."%s"]\n' "$CI_REGISTRY"
-          printf '  ca = ["%s"]\n' "$registry_cert_dir/ca.pem"
-          printf '[registry."%s"]\n' "$CI_DEPENDENCY_PROXY_SERVER"
-          printf '  ca = ["%s"]\n' "$proxy_cert_dir/ca.pem"
-        } > "$HOME/.config/buildkit/buildkitd.toml"
-        export BUILDKITD_FLAGS="$BUILDKITD_FLAGS --config $HOME/.config/buildkit/buildkitd.toml"
-        export SSL_CERT_FILE="$CI_SERVER_TLS_CA_FILE"
-      fi
 
 image-amd64:
   extends:

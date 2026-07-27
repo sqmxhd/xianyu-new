@@ -59,6 +59,9 @@ def main() -> int:
     forbidden_ci = (
         "--insecure-registry",
         "GIT_SSL_NO_VERIFY",
+        "CI_SERVER_TLS_CA_FILE",
+        "update-ca-certificates",
+        "certutil",
         "http = true",
         "insecure = true",
     )

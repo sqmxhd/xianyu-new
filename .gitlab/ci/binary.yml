@@ -17,7 +17,6 @@ linux-x64:
       - .cache/pip/
     policy: pull-push
   before_script:
-    - !reference [.debian-trust, before_script]
     - apt-get update
     - apt-get install -y --no-install-recommends binutils python3 python3-pip python3-venv
     - rm -rf /var/lib/apt/lists/*
@@ -42,8 +41,6 @@ windows-x64:
     - job: frontend
       artifacts: true
     - job: portability
-  before_script:
-    - 'if ($env:CI_SERVER_TLS_CA_FILE -and (Test-Path $env:CI_SERVER_TLS_CA_FILE)) { certutil -user -addstore Root $env:CI_SERVER_TLS_CA_FILE | Out-Null }'
   script:
     - 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/package/build_windows.ps1'
     - 'python tools/package/upload_generic.py --platform windows-x64'

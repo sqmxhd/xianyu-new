@@ -16,7 +16,6 @@ backend:
       - .cache/pip/
     policy: pull-push
   before_script:
-    - !reference [.debian-trust, before_script]
     - python -m venv .ci-venv
     - .ci-venv/bin/python -m pip install --upgrade pip
     - .ci-venv/bin/python -m pip install -r apps/api/requirements.txt -r integrations/xianyu_core/requirements.txt
@@ -35,8 +34,6 @@ frontend:
     paths:
       - .cache/npm/
     policy: pull-push
-  before_script:
-    - !reference [.debian-trust, before_script]
   script:
     - npm --prefix apps/admin ci
     - npm --prefix apps/admin run build
@@ -51,7 +48,5 @@ portability:
   image: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:${PYTHON_IMAGE_TAG}"
   tags:
     - docker
-  before_script:
-    - !reference [.debian-trust, before_script]
   script:
     - python tools/package/check_portability.py
