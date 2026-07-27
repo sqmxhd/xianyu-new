@@ -3,6 +3,7 @@ import { Space, Tag, Tooltip, Typography } from "antd";
 
 import { formatBeijingTime } from "./time";
 import { maskSensitive } from "./privacy";
+import { VoiceMessagePlayer } from "./components/VoiceMessagePlayer";
 import type { Account, ChatMessage, Conversation, MessageCard, RuntimeState } from "./types";
 
 const stateText: Record<RuntimeState, string> = {
@@ -259,8 +260,16 @@ function extractImageUrl(value: unknown): string | null {
 }
 
 export function renderChatMessageContent(chatMessage: ChatMessage, privacyMaskEnabled = false) {
+  const isAudio =
+    chatMessage.message_type === "audio" ||
+    /^\[语音(?:\s*\d+\s*秒)?\]$/.test(chatMessage.content.trim());
   if (privacyMaskEnabled) {
-    const label = chatMessage.message_type === "image" ? "消息图片已隐藏" : "消息内容已隐藏";
+    const label =
+      chatMessage.message_type === "image"
+        ? "消息图片已隐藏"
+        : isAudio
+          ? "语音消息已隐藏"
+          : "消息内容已隐藏";
     return <div className="message-content privacy-message-placeholder">{label}</div>;
   }
   const productCard = chatMessage.cards?.find((card) => card.card_type === "product");
@@ -318,6 +327,16 @@ export function renderChatMessageContent(chatMessage: ChatMessage, privacyMaskEn
   if (chatMessage.message_type === "image" && chatMessage.send_status === "failed") {
     return <div className="message-content">图片发送失败</div>;
   }
+  if (isAudio) {
+    return (
+      <VoiceMessagePlayer
+        accountId={chatMessage.account_id}
+        conversationId={chatMessage.conversation_id}
+        messagePk={chatMessage.message_pk}
+        label={chatMessage.content}
+      />
+    );
+  }
   return <div className="message-content">{chatMessage.content || "[非文本消息]"}</div>;
 }
 
@@ -337,6 +356,9 @@ function failedMessageTitle(chatMessage: ChatMessage) {
   }
   if (chatMessage.message_type === "card") {
     return "卡片未发送成功";
+  }
+  if (chatMessage.message_type === "audio") {
+    return "语音未发送成功";
   }
   return "消息未发送成功";
 }

@@ -358,6 +358,7 @@ class AccountRecord:
     cookie: str = ""
     enabled: bool = True
     conversation_visible: bool = True
+    chat_enabled: bool = False
     order_management_visible: bool = True
     product_management_visible: bool = True
     notification_enabled: bool = True
@@ -430,6 +431,7 @@ class AccountRecord:
             sort_order=self.sort_order,
             enabled=self.enabled,
             conversation_visible=self.conversation_visible,
+            chat_enabled=self.chat_enabled,
             order_management_visible=self.order_management_visible,
             product_management_visible=self.product_management_visible,
             notification_enabled=self.notification_enabled,
@@ -1644,6 +1646,28 @@ class AccountStore:
                 conversation_id,
             )
 
+    async def mark_conversation_read_shared(
+        self,
+        account_id: str,
+        conversation_id: str,
+        *,
+        read_through_at: datetime,
+    ) -> tuple[bool, list[tuple[str, ConversationPayload]]]:
+        """Clear viewer unread state for every enabled user.
+
+        The platform unread counter is intentionally retained as the latest
+        source-platform snapshot.  Resetting it here would make the next
+        platform conversation sync re-introduce the same messages as unread.
+        """
+
+        async with self._account_write_lock(account_id):
+            return await run_db_blocking(
+                self._mark_conversation_read_shared_sync,
+                account_id,
+                conversation_id,
+                read_through_at,
+            )
+
     async def upsert_conversation(
         self,
         *,
@@ -1759,6 +1783,46 @@ class AccountStore:
                 conversation_id=conversation_id,
                 client_request_id=client_request_id,
                 peer_user_id=peer_user_id,
+            )
+
+    async def begin_outbound_text(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        client_request_id: str,
+        peer_user_id: str,
+        text: str,
+    ) -> tuple[MessagePayload | None, bool]:
+        async with self._account_write_lock(account_id):
+            return await run_db_blocking(
+                self._begin_outbound_text_sync,
+                account_id=account_id,
+                conversation_id=conversation_id,
+                client_request_id=client_request_id,
+                peer_user_id=peer_user_id,
+                text=text,
+            )
+
+    async def complete_outbound_text(
+        self,
+        *,
+        account_id: str,
+        client_request_id: str,
+        success: bool,
+        message_id: str | None,
+        error: str | None,
+        raw_payload: object | None,
+    ) -> MessagePayload | None:
+        async with self._account_write_lock(account_id):
+            return await run_db_blocking(
+                self._complete_outbound_text_sync,
+                account_id=account_id,
+                client_request_id=client_request_id,
+                success=success,
+                message_id=message_id,
+                error=error,
+                raw_payload=raw_payload,
             )
 
     async def complete_outbound_image(
@@ -2321,6 +2385,7 @@ class AccountStore:
         send_error: str | None = None,
         raw_payload: object | None = None,
         created_at_ms: int | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         count_unread: bool = True,
         promote_activity: bool | None = None,
     ) -> MessagePayload | None:
@@ -2340,6 +2405,7 @@ class AccountStore:
                 send_error=send_error,
                 raw_payload=raw_payload,
                 created_at_ms=created_at_ms,
+                attachments=attachments,
                 count_unread=count_unread,
                 promote_activity=(
                     count_unread if promote_activity is None else promote_activity
@@ -2876,6 +2942,7 @@ class AccountStore:
             cookie=payload.cookie,
             enabled=payload.enabled,
             conversation_visible=payload.conversation_visible,
+            chat_enabled=payload.chat_enabled,
             order_management_visible=payload.order_management_visible,
             product_management_visible=payload.product_management_visible,
             automation_owner_user_id=automation_owner_user_id,
@@ -3199,6 +3266,7 @@ class AccountStore:
                 return None
             for field_name in (
                 "conversation_visible",
+                "chat_enabled",
                 "order_management_visible",
                 "product_management_visible",
             ):
@@ -6094,6 +6162,112 @@ class AccountStore:
                 viewer_unread_count=0,
             )
 
+    def _mark_conversation_read_shared_sync(
+        self,
+        account_id: str,
+        conversation_id: str,
+        read_through_at: datetime,
+    ) -> tuple[bool, list[tuple[str, ConversationPayload]]]:
+        normalized_read_at = (
+            read_through_at.replace(tzinfo=UTC)
+            if read_through_at.tzinfo is None
+            else read_through_at.astimezone(UTC)
+        )
+        with self._session_factory() as session:
+            result = session.execute(
+                select(ConversationORM, AccountORM)
+                .join(AccountORM, AccountORM.account_id == ConversationORM.account_id)
+                .where(
+                    ConversationORM.account_id == account_id,
+                    ConversationORM.conversation_id == conversation_id,
+                )
+                .limit(1)
+            ).first()
+            if result is None:
+                return False, []
+            conversation, account = result
+            last_inbound_at = conversation.last_inbound_at
+            if last_inbound_at is not None:
+                normalized_last_inbound = (
+                    last_inbound_at.replace(tzinfo=UTC)
+                    if last_inbound_at.tzinfo is None
+                    else last_inbound_at.astimezone(UTC)
+                )
+                if normalized_last_inbound > normalized_read_at:
+                    return False, []
+
+            enabled_user_ids = session.scalars(
+                select(UserORM.user_id).where(UserORM.enabled.is_(True))
+            ).all()
+            if not enabled_user_ids:
+                return True, []
+            states = session.scalars(
+                select(ConversationReadStateORM).where(
+                    ConversationReadStateORM.conversation_pk
+                    == conversation.conversation_pk,
+                    ConversationReadStateORM.user_id.in_(enabled_user_ids),
+                )
+            ).all()
+            states_by_user = {state.user_id: state for state in states}
+            latest_read_message = session.scalars(
+                select(MessageORM)
+                .where(
+                    MessageORM.account_id == account_id,
+                    MessageORM.conversation_id == conversation_id,
+                    MessageORM.direction == "inbound",
+                    MessageORM.created_at_ms
+                    <= int(normalized_read_at.timestamp() * 1000) + 999,
+                )
+                .order_by(MessageORM.created_at_ms.desc(), MessageORM.message_pk.desc())
+                .limit(1)
+            ).first()
+            changed_user_ids: list[str] = []
+            for user_id in enabled_user_ids:
+                read_state = states_by_user.get(user_id)
+                effective_unread = (
+                    read_state.unread_count
+                    if read_state is not None
+                    else conversation.unread_count
+                )
+                if read_state is None:
+                    read_state = ConversationReadStateORM(
+                        state_id=uuid.uuid4().hex,
+                        user_id=user_id,
+                        conversation_pk=conversation.conversation_pk,
+                        created_at=normalized_read_at,
+                        updated_at=normalized_read_at,
+                    )
+                    session.add(read_state)
+                if effective_unread and effective_unread > 0:
+                    changed_user_ids.append(user_id)
+                read_state.unread_count = 0
+                read_state.last_read_message_id = (
+                    latest_read_message.message_id if latest_read_message else None
+                )
+                if (
+                    read_state.last_read_at is None
+                    or read_state.last_read_at < normalized_read_at
+                ):
+                    read_state.last_read_at = normalized_read_at
+                read_state.updated_at = utcnow()
+
+            session.commit()
+            if not changed_user_ids:
+                return True, []
+            avatars = self._conversation_avatar_map(session, [conversation])
+            payload = self._conversation_to_payload(
+                conversation,
+                account_name=(
+                    account.platform_display_name or account.remark or account.account_name
+                ),
+                platform=account.platform,
+                peer_avatar_url=avatars.get(
+                    (conversation.account_id, conversation.peer_user_id or "")
+                ),
+                viewer_unread_count=0,
+            )
+            return True, [(user_id, payload) for user_id in changed_user_ids]
+
     @staticmethod
     def _conversation_avatar_map(
         session: Session,
@@ -6368,6 +6542,126 @@ class AccountStore:
             session.add(message)
             session.commit()
             return self._message_to_payload(message), True
+
+    def _begin_outbound_text_sync(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        client_request_id: str,
+        peer_user_id: str,
+        text: str,
+    ) -> tuple[MessagePayload | None, bool]:
+        with self._session_factory() as session:
+            existing = session.scalars(
+                select(MessageORM)
+                .where(
+                    MessageORM.account_id == account_id,
+                    MessageORM.client_request_id == client_request_id,
+                )
+                .limit(1)
+            ).first()
+            if existing is not None:
+                return self._message_to_payload(existing), False
+
+            account = session.get(AccountORM, account_id)
+            conversation = session.scalars(
+                select(ConversationORM)
+                .where(
+                    ConversationORM.account_id == account_id,
+                    ConversationORM.conversation_id == conversation_id,
+                )
+                .limit(1)
+            ).first()
+            if account is None or conversation is None:
+                return None, False
+
+            now, now_ms = millisecond_now()
+            message = MessageORM(
+                message_pk=uuid.uuid4().hex,
+                account_id=account_id,
+                conversation_id=conversation_id,
+                client_request_id=client_request_id,
+                direction="outbound",
+                message_type="text",
+                content=text,
+                peer_user_id=peer_user_id,
+                send_success=None,
+                send_status="sending",
+                created_at_ms=now_ms,
+                received_at_ms=now_ms,
+                created_at=now,
+                received_at=now,
+            )
+            conversation.message_count = (conversation.message_count or 0) + 1
+            conversation.updated_at = now
+            runtime = self._ensure_runtime(account)
+            runtime.message_count += 1
+            runtime.last_message_at = now
+            runtime.updated_at = now
+            account.updated_at = now
+            session.add(message)
+            session.commit()
+            return self._message_to_payload(message), True
+
+    def _complete_outbound_text_sync(
+        self,
+        *,
+        account_id: str,
+        client_request_id: str,
+        success: bool,
+        message_id: str | None,
+        error: str | None,
+        raw_payload: object | None,
+    ) -> MessagePayload | None:
+        with self._session_factory() as session:
+            message = session.scalars(
+                select(MessageORM)
+                .where(
+                    MessageORM.account_id == account_id,
+                    MessageORM.client_request_id == client_request_id,
+                )
+                .limit(1)
+            ).first()
+            if message is None:
+                return None
+            now = millisecond_now()[0]
+            message.message_id = message_id or message.message_id
+            message.send_success = success
+            message.send_status = "sent" if success else "failed"
+            message.send_error = error
+            message.raw_payload = self._dump_raw_payload(raw_payload)
+            conversation = session.scalars(
+                select(ConversationORM)
+                .where(
+                    ConversationORM.account_id == account_id,
+                    ConversationORM.conversation_id == message.conversation_id,
+                )
+                .limit(1)
+            ).first()
+            if success and conversation is not None:
+                if conversation.last_message_at is None or self._datetime_at_or_after(
+                    message.created_at,
+                    conversation.last_message_at,
+                ):
+                    conversation.last_message_content = message.content
+                    conversation.last_message_type = "text"
+                    conversation.last_message_direction = "outbound"
+                    conversation.last_message_at = message.created_at
+                self._apply_conversation_work_state(
+                    conversation,
+                    direction="outbound",
+                    message_type="text",
+                    created_at=message.created_at,
+                    send_success=True,
+                )
+                conversation.last_activity_at = now
+                conversation.last_activity_content = message.content
+                conversation.last_activity_type = "text"
+                conversation.last_activity_direction = "outbound"
+                conversation.updated_at = now
+            session.commit()
+            return self._message_to_payload(message)
 
     def _complete_outbound_image_sync(
         self,
@@ -9531,6 +9825,7 @@ class AccountStore:
         send_error: str | None,
         raw_payload: object | None,
         created_at_ms: int | None,
+        attachments: list[dict[str, Any]] | None,
         count_unread: bool,
         promote_activity: bool,
     ) -> MessagePayload | None:
@@ -9619,11 +9914,19 @@ class AccountStore:
                     .limit(1)
                 ).first()
             if existing is not None:
+                upgraded_message_type = (
+                    (
+                        existing.message_type == "unknown"
+                        and normalized_message_type != "unknown"
+                    )
+                    or (
+                        existing.message_type == "text"
+                        and existing.content.strip() == "[语音]"
+                        and normalized_message_type == "audio"
+                    )
+                )
                 existing.message_id = message_id or existing.message_id
-                if (
-                    existing.message_type == "unknown"
-                    and normalized_message_type != "unknown"
-                ):
+                if upgraded_message_type:
                     existing.message_type = normalized_message_type
                     existing.content = content
                 existing.peer_user_id = peer_user_id or existing.peer_user_id
@@ -9670,7 +9973,13 @@ class AccountStore:
                         fallback_item_id=item_id,
                     ),
                 )
+                attachments_changed = self._upsert_received_message_attachments(
+                    existing,
+                    attachments,
+                )
                 session.commit()
+                if attachments_changed:
+                    return self._message_to_payload(existing)
                 return None
             conversation = self._get_or_create_conversation(
                 session=session,
@@ -9752,6 +10061,7 @@ class AccountStore:
                 received_at=now if should_promote_activity else None,
             )
             session.add(message)
+            self._upsert_received_message_attachments(message, attachments)
             parsed_cards = self._upsert_message_cards(
                 session,
                 message,
@@ -9776,6 +10086,43 @@ class AccountStore:
                     conversation.item_id = order.item_id
             session.commit()
             return self._message_to_payload(message, cards=parsed_cards)
+
+    @staticmethod
+    def _upsert_received_message_attachments(
+        message: MessageORM,
+        attachments: list[dict[str, Any]] | None,
+    ) -> bool:
+        changed = False
+        existing = {
+            (attachment.attachment_type, attachment.remote_url)
+            for attachment in message.attachments
+        }
+        for item in attachments or []:
+            attachment_type = str(item.get("attachment_type") or "").strip().lower()
+            remote_url = str(item.get("remote_url") or "").strip()
+            if attachment_type not in {"audio"} or not remote_url:
+                continue
+            key = (attachment_type, remote_url[:1500])
+            if key in existing:
+                continue
+            mime_type = str(item.get("mime_type") or "").strip() or None
+            try:
+                size_bytes = int(item["size_bytes"]) if item.get("size_bytes") else None
+            except (TypeError, ValueError):
+                size_bytes = None
+            message.attachments.append(
+                MessageAttachmentORM(
+                    attachment_id=uuid.uuid4().hex,
+                    attachment_type=attachment_type,
+                    remote_url=remote_url[:1500],
+                    mime_type=mime_type[:120] if mime_type else None,
+                    size_bytes=size_bytes if size_bytes is None or size_bytes >= 0 else None,
+                    status="sent",
+                )
+            )
+            existing.add(key)
+            changed = True
+        return changed
 
     @staticmethod
     def _increment_existing_read_states(
@@ -9892,6 +10239,7 @@ class AccountStore:
         if normalized_direction == "inbound" and normalized_type in {
             "text",
             "image",
+            "audio",
             "unknown",
         }:
             conversation.last_inbound_at = created_at
@@ -9914,7 +10262,12 @@ class AccountStore:
             return
         normalized_direction = cls._normalize_direction(direction)
         normalized_type = cls._normalize_message_type(message_type)
-        if normalized_direction == "inbound" and normalized_type in {"text", "image", "unknown"}:
+        if normalized_direction == "inbound" and normalized_type in {
+            "text",
+            "image",
+            "audio",
+            "unknown",
+        }:
             if cls._datetime_at_or_after(created_at, conversation.last_inbound_at):
                 conversation.last_inbound_at = created_at
             if cls._datetime_at_or_after(created_at, conversation.last_outbound_at):
@@ -10175,6 +10528,7 @@ class AccountStore:
             cookie=row.cookie or "",
             enabled=row.enabled,
             conversation_visible=row.conversation_visible,
+            chat_enabled=row.chat_enabled,
             order_management_visible=row.order_management_visible,
             product_management_visible=row.product_management_visible,
             notification_enabled=row.notification_setting.enabled if row.notification_setting else True,
@@ -11425,7 +11779,11 @@ class AccountStore:
 
     @staticmethod
     def _normalize_message_type(value: str) -> str:
-        return value if value in {"text", "image", "card", "system", "unknown"} else "unknown"
+        return (
+            value
+            if value in {"text", "image", "audio", "card", "system", "unknown"}
+            else "unknown"
+        )
 
     @staticmethod
     def _dump_raw_payload(value: object | None) -> str | None:

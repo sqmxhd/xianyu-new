@@ -32,7 +32,13 @@ from .browser_binaries import (
     browser_binary_manager,
     standard_browser_binary_manager,
 )
+from .platform_runtime import (
+    is_root_process,
+    iter_process_arguments,
+    system_browser_candidates,
+)
 from .account_identity import resolve_client_identity
+from .cookie_renewal import CookieRenewalError
 from .executors import run_browser_blocking, run_platform_blocking, run_qr_blocking
 from .qr_login import LOGIN_PAGE_URL, QRLoginError, QRLoginSession
 from .schemas import (
@@ -360,12 +366,35 @@ class _VNCTicket:
     vnc_port: int
 
 
+@dataclass(frozen=True, slots=True)
+class _CookieCheck:
+    state: str
+    cookie: str
+    result: Any | None = None
+    message: str | None = None
+    error_kind: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CookieReconcileResult:
+    sync_status: str
+    browser_status: str
+    local_status: str
+    message: str
+
+
 class IMVerificationManager:
     """Own one reserved verification desktop and a bounded account desktop pool."""
 
-    def __init__(self, store: AccountStore, runtime_manager: Any) -> None:
+    def __init__(
+        self,
+        store: AccountStore,
+        runtime_manager: Any,
+        cookie_coordinator: Any | None = None,
+    ) -> None:
         self._store = store
         self._runtime = runtime_manager
+        self._cookie_coordinator = cookie_coordinator
         self._lock = asyncio.Lock()
         # QR login and risk verification keep a reserved desktop so account VNC
         # sessions cannot prevent an account from recovering its login state.
@@ -402,20 +431,16 @@ class IMVerificationManager:
         configured = settings.im_verification_browser_path
         if configured:
             return configured if Path(configured).is_file() else None
-        for candidate in (
-            "google-chrome-stable",
-            "google-chrome",
-            "chromium",
-            "chromium-browser",
-        ):
-            resolved = shutil.which(candidate)
-            if resolved:
-                return resolved
+        for candidate in system_browser_candidates():
+            if Path(candidate).is_file():
+                return candidate
         return None
 
     def availability_error(self, identity: ClientIdentity | None = None) -> str | None:
         if not settings.im_verification_browser_enabled:
             return "人工验证浏览器未启用"
+        if os.name == "nt":
+            return "Windows 原生版暂不支持内嵌 VNC 浏览器，请使用 Linux 或 Docker 部署"
         if self.browser_path(identity) is None:
             if identity is not None and identity.browser_engine == "fingerprint_chromium":
                 return "账户指定的 Fingerprint Chromium 未安装或不可用"
@@ -428,7 +453,7 @@ class IMVerificationManager:
             return "未安装 x11vnc"
         if importlib.util.find_spec("playwright") is None:
             return "未安装 Playwright Python 依赖"
-        if os.geteuid() == 0 and not settings.im_verification_allow_no_sandbox:
+        if is_root_process() and not settings.im_verification_allow_no_sandbox:
             return "浏览器服务正在以 root 运行，且未允许 no-sandbox 模式"
         return None
 
@@ -794,8 +819,9 @@ class IMVerificationManager:
             verification_id = active.verification_id
             qr_session = active.qr_session
             if purpose == "account_browser":
-                await self._close_account_active_locked(active)
+                reconcile = await self._close_account_active_locked(active)
             else:
+                reconcile = None
                 await self._close_active_locked()
             if purpose == "account_browser":
                 session_id = verification_id.removeprefix("account-browser:")
@@ -804,12 +830,17 @@ class IMVerificationManager:
                     self._account_browser_sessions[session_id] = payload.model_copy(
                         update={
                             "status": "closed",
-                            "message": "浏览器会话已由目录管理停止",
+                            "message": (
+                                reconcile.message
+                                if reconcile is not None
+                                else "浏览器会话已由目录管理停止"
+                            ),
                             "vnc_available": False,
                             "cdp_available": False,
                             "idle_expires_at": None,
                             "max_expires_at": None,
                             "expires_at": None,
+                            **self._cookie_reconcile_payload_updates(reconcile),
                         }
                     )
             elif purpose == "qr_login":
@@ -1123,16 +1154,32 @@ class IMVerificationManager:
                     update={"status": "closing", "message": "正在关闭浏览器"}
                 )
                 self._account_browser_sessions[session_id] = closing
-                await self._close_account_active_locked(active)
+                reconcile = await self._close_account_active_locked(active)
+            else:
+                reconcile = None
+            reconcile_updates = (
+                {
+                    "cookie_sync_status": reconcile.sync_status,
+                    "browser_cookie_status": reconcile.browser_status,
+                    "local_cookie_status": reconcile.local_status,
+                }
+                if reconcile is not None
+                else {}
+            )
             closed = payload.model_copy(
                 update={
                     "status": "closed",
-                    "message": "浏览器会话已关闭",
+                    "message": (
+                        reconcile.message
+                        if reconcile is not None
+                        else "浏览器会话已关闭"
+                    ),
                     "vnc_available": False,
                     "cdp_available": False,
                     "idle_expires_at": None,
                     "max_expires_at": None,
                     "expires_at": None,
+                    **reconcile_updates,
                 }
             )
             self._account_browser_sessions[session_id] = closed
@@ -1914,7 +1961,7 @@ class IMVerificationManager:
                 "Sec-CH-UA": effective_identity.sec_ch_ua,
                 "Sec-CH-UA-Platform": f'"{effective_identity.sec_ch_ua_platform}"',
             }
-        if os.geteuid() == 0 and settings.im_verification_allow_no_sandbox:
+        if is_root_process() and settings.im_verification_allow_no_sandbox:
             options["args"].extend(("--no-sandbox", "--disable-setuid-sandbox"))
         if enable_cdp:
             effective_cdp_port = cdp_port or settings.account_browser_cdp_port
@@ -2050,6 +2097,48 @@ class IMVerificationManager:
             return str(ip_address(normalized))
         except ValueError:
             return None
+
+    @staticmethod
+    def _compare_proxy_exit_ips(
+        observed_ips: set[str],
+        expected_ips: set[str],
+    ) -> tuple[bool | None, set[int]]:
+        """Compare matching address families without treating a missing baseline as a leak."""
+
+        if not observed_ips or not expected_ips:
+            return None, {
+                ip_address(item).version for item in observed_ips
+            }
+        observed_by_family = {
+            version: {
+                item for item in observed_ips if ip_address(item).version == version
+            }
+            for version in (4, 6)
+        }
+        expected_by_family = {
+            version: {
+                item for item in expected_ips if ip_address(item).version == version
+            }
+            for version in (4, 6)
+        }
+        missing_families = {
+            version
+            for version in (4, 6)
+            if observed_by_family[version] and not expected_by_family[version]
+        }
+        comparable_families = {
+            version
+            for version in (4, 6)
+            if observed_by_family[version] and expected_by_family[version]
+        }
+        if any(
+            not observed_by_family[version].issubset(expected_by_family[version])
+            for version in comparable_families
+        ):
+            return False, missing_families
+        if missing_families or not comparable_families:
+            return None, missing_families
+        return True, set()
 
     async def _account_proxy_exit_ips(self, account: AccountRecord) -> set[str]:
         if not account.proxy_id:
@@ -2263,10 +2352,9 @@ class IMVerificationManager:
             )
             if (normalized := IMVerificationManager._normalize_ip_value(item))
         }
-        webrtc_proxy_match = (
-            normalized_candidate_ips.issubset(normalized_expected_ips)
-            if normalized_candidate_ips and normalized_expected_ips
-            else None
+        webrtc_proxy_match, _ = IMVerificationManager._compare_proxy_exit_ips(
+            normalized_candidate_ips,
+            normalized_expected_ips,
         )
         webrtc_probe_configured = bool(
             getattr(settings, "browser_fingerprint_probe_stun_url", "")
@@ -2276,10 +2364,12 @@ class IMVerificationManager:
             if proxy_enabled
             else set()
         )
-        browser_egress_match = (
-            browser_egress_ips.issubset(normalized_expected_ips)
-            if browser_egress_ips and normalized_expected_ips
-            else None
+        (
+            browser_egress_match,
+            browser_missing_proxy_families,
+        ) = IMVerificationManager._compare_proxy_exit_ips(
+            browser_egress_ips,
+            normalized_expected_ips,
         )
         risk_findings: list[str] = []
         if navigator_webdriver:
@@ -2302,6 +2392,13 @@ class IMVerificationManager:
                 risk_findings.append("WebRTC 公网候选地址尚无法与账户代理出口比对")
             if browser_egress_match is False:
                 risk_findings.append("Chromium HTTP 出口与账户代理出口不一致")
+            elif browser_missing_proxy_families:
+                missing_labels = "、".join(
+                    f"IPv{version}" for version in sorted(browser_missing_proxy_families)
+                )
+                risk_findings.append(
+                    f"Chromium {missing_labels} 出口缺少账户代理基线，需复核"
+                )
             elif browser_egress_match is None and webrtc_proxy_match is not True:
                 risk_findings.append("Chromium HTTP 出口尚无法与账户代理基线比对")
         else:
@@ -2675,8 +2772,12 @@ class IMVerificationManager:
                     and time.time() >= active.max_expires_at - 0.5
                 )
                 if purpose == "account_browser":
-                    await self._close_account_active_locked(active, cancel_timeout=False)
+                    reconcile = await self._close_account_active_locked(
+                        active,
+                        cancel_timeout=False,
+                    )
                 else:
+                    reconcile = None
                     await self._close_active_locked(cancel_timeout=False)
                 if purpose == "qr_login":
                     session_id = verification_id.removeprefix("qr:")
@@ -2694,15 +2795,20 @@ class IMVerificationManager:
                             update={
                                 "status": "expired",
                                 "message": (
-                                    "平台账户浏览器已达到最长运行时间"
-                                    if expired_at_maximum
-                                    else "平台账户浏览器因长时间无操作已关闭"
+                                    reconcile.message
+                                    if reconcile is not None
+                                    else (
+                                        "平台账户浏览器已达到最长运行时间"
+                                        if expired_at_maximum
+                                        else "平台账户浏览器因长时间无操作已关闭"
+                                    )
                                 ),
                                 "vnc_available": False,
                                 "cdp_available": False,
                                 "idle_expires_at": None,
                                 "max_expires_at": None,
                                 "expires_at": None,
+                                **self._cookie_reconcile_payload_updates(reconcile),
                             }
                         )
                 else:
@@ -2714,32 +2820,36 @@ class IMVerificationManager:
         except asyncio.CancelledError:
             raise
 
-    async def _close_active_locked(self, *, cancel_timeout: bool = True) -> None:
+    async def _close_active_locked(
+        self,
+        *,
+        cancel_timeout: bool = True,
+    ) -> _CookieReconcileResult | None:
         active = self._active
         self._active = None
         if active is None:
-            return
-        await self._close_session_resources(active, cancel_timeout=cancel_timeout)
+            return None
+        return await self._close_session_resources(active, cancel_timeout=cancel_timeout)
 
     async def _close_account_active_locked(
         self,
         active: _ActiveSession,
         *,
         cancel_timeout: bool = True,
-    ) -> None:
+    ) -> _CookieReconcileResult | None:
         current = self._account_actives.get(active.verification_id)
         if current is active:
             self._account_actives.pop(active.verification_id, None)
         if self._active is active:
             self._active = None
-        await self._close_session_resources(active, cancel_timeout=cancel_timeout)
+        return await self._close_session_resources(active, cancel_timeout=cancel_timeout)
 
     async def _close_session_resources(
         self,
         active: _ActiveSession,
         *,
         cancel_timeout: bool,
-    ) -> None:
+    ) -> _CookieReconcileResult | None:
         if cancel_timeout and active.timeout_task is not None:
             active.timeout_task.cancel()
         self._tickets = {
@@ -2747,27 +2857,82 @@ class IMVerificationManager:
             for ticket, value in self._tickets.items()
             if value.verification_id != active.verification_id
         }
+        browser_cookie: str | None = None
+        capture_error: str | None = None
         if active.purpose == "account_browser" and active.account_id and active.baseline_cookie:
-            with suppress(Exception):
-                await self._persist_account_browser_cookies(active)
+            try:
+                browser_cookie = await self._read_account_browser_cookie(active)
+            except Exception as exc:
+                capture_error = str(exc)
+                logger.warning(
+                    "Unable to read account browser Cookie before close account=%s: %s",
+                    active.account_id,
+                    exc,
+                )
         with suppress(Exception):
             await active.context.close()
         if active.bridge is not None:
-            await active.bridge.close()
+            with suppress(Exception):
+                await active.bridge.close()
         if active.desktop is not None:
-            await self._stop_visual_desktop(active.desktop)
+            with suppress(Exception):
+                await self._stop_visual_desktop(active.desktop)
         if active.temporary_profile is not None:
             with suppress(OSError):
                 shutil.rmtree(active.temporary_profile)
 
-    async def _persist_account_browser_cookies(self, active: _ActiveSession) -> None:
-        if not active.account_id or not active.baseline_cookie:
-            return
+        if (
+            active.purpose != "account_browser"
+            or not active.account_id
+            or self._cookie_coordinator is None
+        ):
+            return None
+        try:
+            return await self._reconcile_account_browser_cookie(
+                active,
+                browser_cookie,
+                capture_error=capture_error,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Unable to reconcile account browser Cookie account=%s",
+                active.account_id,
+            )
+            return _CookieReconcileResult(
+                sync_status="failed",
+                browser_status="unknown",
+                local_status="not_checked",
+                message=f"浏览器会话已关闭，Cookie 核对失败：{exc}",
+            )
+
+    @staticmethod
+    def _serialize_cookie_map(cookie_map: dict[str, str]) -> str:
+        return "; ".join(f"{key}={value}" for key, value in cookie_map.items())
+
+    @staticmethod
+    def _cookie_reconcile_payload_updates(
+        reconcile: _CookieReconcileResult | None,
+    ) -> dict[str, str]:
+        if reconcile is None:
+            return {}
+        return {
+            "cookie_sync_status": reconcile.sync_status,
+            "browser_cookie_status": reconcile.browser_status,
+            "local_cookie_status": reconcile.local_status,
+        }
+
+    @staticmethod
+    def _cookie_maps_equal(left: str, right: str) -> bool:
+        upstream = load_upstream_modules()
+        return upstream.trans_cookies(left) == upstream.trans_cookies(right)
+
+    async def _read_account_browser_cookie(self, active: _ActiveSession) -> str:
         browser_cookies = await active.context.cookies(
             [
                 "https://www.goofish.com/",
                 "https://h5api.m.goofish.com/",
                 "https://passport.goofish.com/",
+                "https://log.mmstat.com/",
             ]
         )
         browser_map = {
@@ -2775,19 +2940,262 @@ class IMVerificationManager:
             for cookie in browser_cookies
             if cookie.get("name") and cookie.get("value") is not None
         }
+        return self._serialize_cookie_map(browser_map)
+
+    async def _check_web_cookie(
+        self,
+        account: AccountRecord,
+        cookie: str,
+    ) -> _CookieCheck:
         upstream = load_upstream_modules()
-        baseline_map = upstream.trans_cookies(active.baseline_cookie)
-        expected_unb = str(baseline_map.get("unb") or "")
-        if not expected_unb or str(browser_map.get("unb") or "") != expected_unb:
+        cookie_map = upstream.trans_cookies(cookie)
+        if not str(cookie_map.get("unb") or "") or not str(
+            cookie_map.get("_m_h5_tk") or ""
+        ):
+            return _CookieCheck(
+                state="invalid",
+                cookie=cookie,
+                message="Cookie 缺少 Web 平台必要字段",
+                error_kind="suspected_expired",
+            )
+        coordinator = self._cookie_coordinator
+        validator = getattr(coordinator, "validate_cookie", None)
+        if not callable(validator):
+            return _CookieCheck(
+                state="unknown",
+                cookie=cookie,
+                message="Web Cookie 验证服务未配置",
+                error_kind="validator_unavailable",
+            )
+        try:
+            result = await validator(account, cookie)
+            return _CookieCheck(
+                state="valid",
+                cookie=result.new_cookie,
+                result=result,
+                message=result.message,
+            )
+        except CookieRenewalError as exc:
+            state = (
+                "invalid"
+                if exc.kind
+                in {"suspected_expired", "auth_expired", "verification_required"}
+                else "unknown"
+            )
+            return _CookieCheck(
+                state=state,
+                cookie=cookie,
+                message=str(exc),
+                error_kind=exc.kind,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Unable to validate Web Cookie candidate account=%s: %s",
+                account.account_id,
+                exc,
+            )
+            return _CookieCheck(
+                state="unknown",
+                cookie=cookie,
+                message=str(exc),
+                error_kind="internal_error",
+            )
+
+    async def _persist_validated_browser_cookie(
+        self,
+        account: AccountRecord,
+        check: _CookieCheck,
+        *,
+        message: str,
+    ) -> bool:
+        coordinator = self._cookie_coordinator
+        persist = getattr(coordinator, "persist_validated_cookie", None)
+        if not callable(persist) or check.result is None:
+            return False
+        current = account
+        for _ in range(2):
+            persisted = await persist(
+                current,
+                expected_cookie=current.cookie,
+                result=check.result,
+                source="account_browser",
+                message=message,
+            )
+            if persisted:
+                return True
+            latest = await self._store.get_account(account.account_id)
+            if latest is None:
+                return False
+            expected_unb = str(
+                load_upstream_modules().trans_cookies(account.cookie).get("unb") or ""
+            )
+            latest_unb = str(
+                load_upstream_modules().trans_cookies(latest.cookie).get("unb") or ""
+            )
+            if expected_unb and latest_unb and latest_unb != expected_unb:
+                return False
+            current = latest
+        return False
+
+    async def _persist_validated_local_cookie(
+        self,
+        account: AccountRecord,
+        check: _CookieCheck,
+    ) -> None:
+        coordinator = self._cookie_coordinator
+        persist = getattr(coordinator, "persist_validated_cookie", None)
+        if not callable(persist) or check.result is None:
             return
-        merged = dict(baseline_map)
-        merged.update(browser_map)
-        updated_cookie = "; ".join(f"{key}={value}" for key, value in merged.items())
-        await self._store.compare_and_set_account_cookie(
-            active.account_id,
-            active.baseline_cookie,
-            updated_cookie,
-            source="account_browser",
+        await persist(
+            account,
+            expected_cookie=account.cookie,
+            result=check.result,
+            source="account_browser_local_validation",
+            message="VNC 结束核对：浏览器凭据异常，已保留并验证本地 Web Cookie",
+        )
+
+    async def _trigger_account_browser_auth_recovery(
+        self,
+        account: AccountRecord,
+        browser_check: _CookieCheck,
+        local_check: _CookieCheck,
+    ) -> None:
+        coordinator = self._cookie_coordinator
+        trigger = getattr(coordinator, "handle_auth_expired", None)
+        if callable(trigger):
+            await trigger(
+                account.account_id,
+                source="account_browser",
+                message=(
+                    "VNC 结束核对发现浏览器与本地 Web Cookie 均异常："
+                    f"浏览器={browser_check.message or browser_check.error_kind or '异常'}；"
+                    f"本地={local_check.message or local_check.error_kind or '异常'}"
+                ),
+            )
+
+    async def _reconcile_account_browser_cookie(
+        self,
+        active: _ActiveSession,
+        browser_cookie: str | None,
+        *,
+        capture_error: str | None = None,
+    ) -> _CookieReconcileResult:
+        if not active.account_id:
+            return _CookieReconcileResult(
+                sync_status="failed",
+                browser_status="not_checked",
+                local_status="not_checked",
+                message="浏览器会话已关闭，但账户标识缺失，未更新 Cookie",
+            )
+        account = await self._store.get_account(active.account_id)
+        if account is None:
+            return _CookieReconcileResult(
+                sync_status="failed",
+                browser_status="not_checked",
+                local_status="not_checked",
+                message="浏览器会话已关闭，但账户已不存在，未更新 Cookie",
+            )
+
+        upstream = load_upstream_modules()
+        baseline_map = upstream.trans_cookies(active.baseline_cookie or "")
+        local_map = upstream.trans_cookies(account.cookie)
+        browser_map = upstream.trans_cookies(browser_cookie or "")
+        expected_unb = str(baseline_map.get("unb") or local_map.get("unb") or "")
+        browser_unb = str(browser_map.get("unb") or "")
+        local_unb = str(local_map.get("unb") or "")
+        if (
+            (expected_unb and browser_unb and browser_unb != expected_unb)
+            or (expected_unb and local_unb and local_unb != expected_unb)
+        ):
+            return _CookieReconcileResult(
+                sync_status="account_mismatch",
+                browser_status="invalid",
+                local_status="unknown",
+                message="浏览器会话已关闭，检测到闲鱼账号不一致，已拒绝更新 Cookie",
+            )
+
+        if browser_cookie:
+            browser_check = await self._check_web_cookie(account, browser_cookie)
+        else:
+            browser_check = _CookieCheck(
+                state="unknown" if capture_error else "invalid",
+                cookie="",
+                message=capture_error or "浏览器未返回 Cookie",
+                error_kind="capture_failed" if capture_error else "suspected_expired",
+            )
+
+        if browser_cookie and self._cookie_maps_equal(browser_cookie, account.cookie):
+            local_check = browser_check
+        else:
+            local_check = await self._check_web_cookie(account, account.cookie)
+
+        if browser_check.state == "valid":
+            both_valid = local_check.state == "valid"
+            if both_valid:
+                decision_message = (
+                    "VNC 结束核对：浏览器与本地 Cookie 均正常，已采用浏览器最新 Cookie"
+                )
+            elif local_check.state == "invalid":
+                decision_message = (
+                    "VNC 结束核对：浏览器 Cookie 正常、本地 Cookie 异常，已采用浏览器 Cookie"
+                )
+            else:
+                decision_message = (
+                    "VNC 结束核对：浏览器 Cookie 正常、本地状态暂未确认，"
+                    "已采用验证通过的浏览器 Cookie"
+                )
+            persisted = await self._persist_validated_browser_cookie(
+                account,
+                browser_check,
+                message=decision_message,
+            )
+            if persisted:
+                changed = not self._cookie_maps_equal(
+                    browser_check.cookie,
+                    account.cookie,
+                )
+                return _CookieReconcileResult(
+                    sync_status=(
+                        "updated_from_browser" if changed else "refreshed_from_browser"
+                    ),
+                    browser_status=browser_check.state,
+                    local_status=local_check.state,
+                    message=decision_message,
+                )
+            return _CookieReconcileResult(
+                sync_status="unknown",
+                browser_status=browser_check.state,
+                local_status=local_check.state,
+                message="浏览器会话已关闭，Cookie 核对期间本地凭据发生变化，未完成更新",
+            )
+
+        if local_check.state == "valid":
+            await self._persist_validated_local_cookie(account, local_check)
+            return _CookieReconcileResult(
+                sync_status="kept_local",
+                browser_status=browser_check.state,
+                local_status=local_check.state,
+                message="VNC 结束核对：浏览器 Cookie 异常，已保留本地正常 Cookie",
+            )
+
+        if browser_check.state == "invalid" and local_check.state == "invalid":
+            await self._trigger_account_browser_auth_recovery(
+                account,
+                browser_check,
+                local_check,
+            )
+            return _CookieReconcileResult(
+                sync_status="auth_recovery",
+                browser_status=browser_check.state,
+                local_status=local_check.state,
+                message="VNC 结束核对：浏览器与本地 Cookie 均异常，已启动认证恢复链路",
+            )
+
+        return _CookieReconcileResult(
+            sync_status="unknown",
+            browser_status=browser_check.state,
+            local_status=local_check.state,
+            message="浏览器会话已关闭，Cookie 状态暂时无法确认，未覆盖本地凭据，请稍后复核",
         )
 
     def _decorate(self, payload: IMVerificationPayload | None) -> IMVerificationPayload | None:
@@ -2957,12 +3365,8 @@ class IMVerificationManager:
     @staticmethod
     def _remove_stale_profile_locks(profile: Path) -> None:
         profile_text = str(profile.resolve())
-        for process_dir in Path("/proc").glob("[0-9]*"):
-            try:
-                command = (process_dir / "cmdline").read_bytes().decode("utf-8", "ignore")
-            except (OSError, PermissionError):
-                continue
-            if profile_text in command:
+        for _process_id, arguments in iter_process_arguments():
+            if profile_text in arguments or f"--user-data-dir={profile_text}" in arguments:
                 raise IMVerificationBusyError("账户浏览器 Profile 正在被使用")
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             path = profile / name

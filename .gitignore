@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.production
+.env.docker
 .env.*.local
 data/
 __pycache__/
@@ -15,3 +16,9 @@ apps/admin/*.tsbuildinfo
 apps/admin/vite.config.d.ts
 apps/admin/vite.config.js
 artifacts/
+.ci-venv/
+
+# Local TLS deployment bundles and trust anchors must never be committed.
+*-deployment.zip
+internal-root-current-*.pem
+data/tls/

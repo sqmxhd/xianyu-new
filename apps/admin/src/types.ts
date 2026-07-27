@@ -231,6 +231,17 @@ export interface AccountBrowserSession {
   browser_error?: string | null;
   vnc_available: boolean;
   cdp_available: boolean;
+  cookie_sync_status:
+    | "pending"
+    | "updated_from_browser"
+    | "refreshed_from_browser"
+    | "kept_local"
+    | "auth_recovery"
+    | "account_mismatch"
+    | "unknown"
+    | "failed";
+  browser_cookie_status: "not_checked" | "valid" | "invalid" | "unknown";
+  local_cookie_status: "not_checked" | "valid" | "invalid" | "unknown";
   fingerprint_snapshot?: BrowserFingerprintSnapshot | null;
   fingerprint_detection_status: "pending" | "collecting" | "ready" | "failed";
   fingerprint_detection_error?: string | null;
@@ -438,12 +449,12 @@ export interface Conversation {
   item_context_source?: string | null;
   item_context_at?: string | null;
   last_message_content?: string | null;
-  last_message_type: "text" | "image" | "card" | "system" | "unknown";
+  last_message_type: "text" | "image" | "audio" | "card" | "system" | "unknown";
   last_message_direction?: "inbound" | "outbound" | null;
   last_message_at?: string | null;
   last_activity_at?: string | null;
   last_activity_content?: string | null;
-  last_activity_type?: "text" | "image" | "card" | "system" | "unknown" | null;
+  last_activity_type?: "text" | "image" | "audio" | "card" | "system" | "unknown" | null;
   last_activity_direction?: "inbound" | "outbound" | null;
   message_count: number;
   unread_count: number;
@@ -485,7 +496,7 @@ export interface ChatMessage {
   message_id?: string | null;
   client_request_id?: string | null;
   direction: "inbound" | "outbound";
-  message_type: "text" | "image" | "card" | "system" | "unknown";
+  message_type: "text" | "image" | "audio" | "card" | "system" | "unknown";
   content: string;
   peer_user_id?: string | null;
   peer_name?: string | null;
@@ -505,7 +516,7 @@ export interface ChatMessage {
 
 export interface MessageAttachment {
   attachment_id: string;
-  attachment_type: "image";
+  attachment_type: "image" | "audio";
   remote_url?: string | null;
   mime_type?: string | null;
   width?: number | null;
@@ -806,7 +817,7 @@ export interface AutoReplyRuleIssue {
 export interface AutoReplyPreviewRequest {
   account_id: string;
   content: string;
-  message_type: "text" | "image" | "card" | "system" | "unknown";
+  message_type: "text" | "image" | "audio" | "card" | "system" | "unknown";
   sender_user_id?: string | null;
   conversation_id?: string | null;
   item_id?: string | null;
@@ -1494,6 +1505,7 @@ export interface Account {
   sort_order: number;
   enabled: boolean;
   conversation_visible: boolean;
+  chat_enabled: boolean;
   order_management_visible: boolean;
   product_management_visible: boolean;
   notification_enabled: boolean;
@@ -1585,4 +1597,49 @@ export interface ProxyTestResult {
   exit_ipv6_country?: string | null;
   exit_ipv6_continent?: string | null;
   platform_status_code?: number | null;
+}
+
+export interface ChatwootConfig {
+  config_id: string;
+  enabled: boolean;
+  base_url: string;
+  inbox_identifier: string;
+  chatwoot_inbox_id?: number | null;
+  webhook_secret: string;
+  client_hmac_token?: string | null;
+  api_access_token?: string | null;
+  chatwoot_account_id?: number | null;
+  has_webhook_secret: boolean;
+  has_client_hmac_token: boolean;
+  has_api_access_token: boolean;
+  full_outbound_sync_enabled: boolean;
+  account_grouping_enabled: boolean;
+  managed_inbox_count: number;
+  callback_path: string;
+  callback_url: string;
+  status: string;
+  last_error?: string | null;
+  last_webhook_at?: string | null;
+  last_push_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatwootConfigFormValues {
+  enabled: boolean;
+  base_url: string;
+  inbox_identifier: string;
+  callback_url: string;
+  webhook_secret?: string;
+  client_hmac_token?: string;
+  clear_client_hmac_token?: boolean;
+  chatwoot_account_id?: number | null;
+  api_access_token?: string;
+  clear_api_access_token?: boolean;
+}
+
+export interface ChatwootTestResult {
+  success: boolean;
+  message: string;
+  status_code?: number | null;
 }

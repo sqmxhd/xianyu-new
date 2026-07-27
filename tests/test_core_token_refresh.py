@@ -7,7 +7,7 @@ from integrations.xianyu_core.client import (
     RiskControlError,
     XianyuAccountSession,
 )
-from integrations.xianyu_core.models import AccountConfig
+from integrations.xianyu_core.models import AccountConfig, ConnectionState
 
 
 class _TokenApi:
@@ -118,6 +118,34 @@ class CoreTokenRefreshTests(unittest.IsolatedAsyncioTestCase):
                 await session._get_im_token()
         finally:
             _TokenApi.response = original_response
+
+    async def test_im_token_url_in_network_error_is_not_auth_expired(self) -> None:
+        session = XianyuAccountSession(
+            AccountConfig("account-1", "unb=seller-1; _m_h5_tk=old-token"),
+            _TokenUpstream(),
+        )
+
+        state = session._classify_connection_error(
+            requests.exceptions.SSLError(
+                "HTTPSConnectionPool(host='h5api.m.goofish.com', "
+                "url='/h5/mtop.taobao.idlemessage.pc.login.token/1.0/'): "
+                "UNEXPECTED_EOF_WHILE_READING"
+            )
+        )
+
+        self.assertEqual(state, ConnectionState.ERROR)
+
+    async def test_explicit_im_auth_exception_remains_auth_expired(self) -> None:
+        session = XianyuAccountSession(
+            AccountConfig("account-1", "unb=seller-1; _m_h5_tk=old-token"),
+            _TokenUpstream(),
+        )
+
+        state = session._classify_connection_error(
+            AuthenticationExpiredError("IM access token session expired")
+        )
+
+        self.assertEqual(state, ConnectionState.AUTH_EXPIRED)
 
 
 if __name__ == "__main__":

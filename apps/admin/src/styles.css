@@ -328,8 +328,44 @@ body {
   width: 100%;
 }
 
+.chatwoot-config-form {
+  max-width: 980px;
+}
+
+.chatwoot-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+
+.chatwoot-config-span-2 {
+  grid-column: 1 / -1;
+}
+
+.chatwoot-config-status {
+  min-height: 32px;
+  align-items: center;
+}
+
+.chatwoot-config-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid #f0f0f0;
+}
+
 .browser-runtime-page {
   gap: 12px !important;
+}
+
+@media (max-width: 767px) {
+  .chatwoot-config-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chatwoot-config-span-2 {
+    grid-column: auto;
+  }
 }
 
 .browser-runtime-summary,
@@ -1809,11 +1845,11 @@ body {
 
 .account-feature-switches {
   display: grid;
-  grid-template-columns: repeat(2, 48px);
+  grid-template-columns: 48px 56px;
   grid-auto-rows: 16px;
   align-items: center;
   justify-content: center;
-  width: 104px;
+  width: 112px;
   margin-inline: auto;
   column-gap: 8px;
   row-gap: 6px;
@@ -1823,6 +1859,11 @@ body {
 .account-feature-switches .ant-switch {
   width: 48px;
   min-width: 48px;
+}
+
+.account-feature-switches .account-chat-switch {
+  width: 56px;
+  min-width: 56px;
 }
 
 .account-feature-switches .ant-switch-inner {
@@ -2283,6 +2324,38 @@ body {
 .message-content {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.message-recall-state {
+  display: flex;
+  margin-top: 8px;
+}
+
+.message-row.outbound .message-recall-state {
+  justify-content: flex-end;
+}
+
+.message-recall-state .ant-tag {
+  margin-inline-end: 0;
+}
+
+.voice-message-player {
+  display: inline-flex;
+  min-width: 112px;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-message-play.ant-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #1677ff;
+  font-size: 22px;
+}
+
+.voice-message-error {
+  color: #d4380d;
 }
 
 .message-product-card {

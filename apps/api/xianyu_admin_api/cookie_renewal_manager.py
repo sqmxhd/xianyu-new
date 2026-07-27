@@ -48,6 +48,12 @@ class CookieRenewalManager:
         enabled: bool = settings.cookie_renewal_enabled,
         interval_hours: float = settings.cookie_renewal_interval_hours,
         keepalive_seconds: int = settings.cookie_keepalive_interval_seconds,
+        keepalive_recheck_min_seconds: float = (
+            settings.cookie_keepalive_recheck_min_seconds
+        ),
+        keepalive_recheck_max_seconds: float = (
+            settings.cookie_keepalive_recheck_max_seconds
+        ),
         scan_seconds: int = settings.cookie_renewal_scan_seconds,
         manual_cooldown_seconds: int = settings.cookie_renewal_manual_cooldown_seconds,
     ) -> None:
@@ -57,6 +63,11 @@ class CookieRenewalManager:
         self._enabled = enabled
         self._interval = timedelta(hours=max(interval_hours, 1 / 60))
         self._keepalive_interval = timedelta(seconds=max(keepalive_seconds, 60))
+        self._keepalive_recheck_min_seconds = max(0.0, keepalive_recheck_min_seconds)
+        self._keepalive_recheck_max_seconds = max(
+            self._keepalive_recheck_min_seconds,
+            keepalive_recheck_max_seconds,
+        )
         self._scan_seconds = max(scan_seconds, 10)
         self._manual_cooldown = timedelta(seconds=max(manual_cooldown_seconds, 0))
         self._loop_task: asyncio.Task[None] | None = None
@@ -64,6 +75,7 @@ class CookieRenewalManager:
         self._keepalive_tasks: dict[str, asyncio.Task[None]] = {}
         self._last_keepalive_at: dict[str, datetime] = {}
         self._trigger_sources: dict[str, str | None] = {}
+        self._previous_error_kinds: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
         self._renewal_slot = asyncio.Semaphore(settings.cookie_renewal_concurrency)
 
@@ -82,6 +94,8 @@ class CookieRenewalManager:
             tasks = [*self._tasks.values(), *self._keepalive_tasks.values()]
             self._tasks.clear()
             self._keepalive_tasks.clear()
+            self._trigger_sources.clear()
+            self._previous_error_kinds.clear()
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -118,6 +132,9 @@ class CookieRenewalManager:
             status = await self._store.begin_cookie_renewal(account_id, trigger)
             if status is None:
                 return None
+            self._previous_error_kinds[account_id] = (
+                current.last_error_kind if current is not None else None
+            )
             await self._publish_status(status)
             task = asyncio.create_task(
                 self._execute(account_id), name=f"cookie-renewal:{account_id}"
@@ -136,18 +153,25 @@ class CookieRenewalManager:
         source: str,
         message: str,
     ) -> CookieRenewalStatusPayload | None:
-        """Deduplicate one HTTP recovery for an authoritative platform auth failure."""
+        """Confirm one Web-platform auth failure without using IM token state."""
 
         status = await self._store.get_cookie_renewal_status(account_id)
         if status is None:
             return None
+        if source == "im_runtime":
+            logger.info(
+                "Ignoring IM auth state for Web Cookie health account=%s: %s",
+                account_id,
+                message,
+            )
+            return status
         if status.manual_action_required:
             return status
         existing = self._tasks.get(account_id)
         if existing is not None and not existing.done():
             return status
         logger.warning(
-            "Platform authentication expired account=%s source=%s: %s",
+            "Platform Web authentication requires confirmation account=%s source=%s: %s",
             account_id,
             source,
             message,
@@ -170,6 +194,57 @@ class CookieRenewalManager:
         if status is not None:
             await self._publish_status(status)
         return status
+
+    async def validate_cookie(
+        self,
+        account: AccountRecord,
+        cookie: str,
+    ) -> Any:
+        """Validate one Web Cookie candidate without persisting it."""
+
+        if not cookie:
+            raise CookieRenewalError(
+                "Cookie 为空，无法验证 Web 登录状态",
+                kind="suspected_expired",
+            )
+        return await self._probe_cookie(account, cookie)
+
+    async def persist_validated_cookie(
+        self,
+        account: AccountRecord,
+        *,
+        expected_cookie: str,
+        result: Any,
+        source: str,
+        message: str,
+    ) -> bool:
+        """Atomically persist an already validated Cookie and apply it to runtime."""
+
+        status, persisted = await self._store.record_cookie_validation(
+            account.account_id,
+            expected_cookie=expected_cookie,
+            new_cookie=result.new_cookie,
+            source=source,
+            message=message,
+        )
+        if status is not None:
+            await self._publish_status(status)
+        if not persisted:
+            return False
+        if result.new_cookie != expected_cookie:
+            try:
+                await self._runtime_manager.replace_cookie(
+                    account.account_id,
+                    result.new_cookie,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Validated Cookie could not be applied to runtime account=%s source=%s: %s",
+                    account.account_id,
+                    source,
+                    exc,
+                )
+        return True
 
     async def _execute(self, account_id: str) -> None:
         account = await self._store.get_account(account_id)
@@ -243,20 +318,39 @@ class CookieRenewalManager:
         except asyncio.CancelledError:
             raise
         except CookieRenewalError as exc:
-            auth_expired = exc.kind == "auth_expired"
+            auth_candidate = exc.kind == "auth_expired"
+            confirmed_auth_expired = bool(
+                auth_candidate
+                and (
+                    (status is not None and status.trigger == "auth_recovery")
+                    or self._previous_error_kinds.get(account_id) == "suspected_expired"
+                )
+            )
+            error_kind = (
+                "auth_expired"
+                if confirmed_auth_expired
+                else "suspected_expired"
+                if auth_candidate
+                else exc.kind
+            )
+            if confirmed_auth_expired:
+                failure_message = f"{exc}；Web Cookie 多链路确认失效，请重新扫码登录"
+                next_attempt_at = None
+            elif auth_candidate:
+                failure_message = f"{exc}；Web Cookie 状态待复核，将在后台再次验证"
+                next_attempt_at = self._next_keepalive_recheck()
+            else:
+                failure_message = str(exc)
+                next_attempt_at = self._next_failure_attempt(
+                    account,
+                    status,
+                    attempt_count,
+                )
             failed = await self._store.fail_cookie_renewal(
                 account_id,
-                message=(
-                    f"{exc}；自动 HTTP 恢复失败，请重新扫码登录"
-                    if auth_expired
-                    else str(exc)
-                ),
-                next_attempt_at=(
-                    None
-                    if auth_expired
-                    else self._next_failure_attempt(account, status, attempt_count)
-                ),
-                error_kind=exc.kind,
+                message=failure_message,
+                next_attempt_at=next_attempt_at,
+                error_kind=error_kind,
                 phase="renewing",
                 error_source=self._trigger_sources.get(account_id),
             )
@@ -294,13 +388,6 @@ class CookieRenewalManager:
             if status is None:
                 continue
             if status.manual_action_required:
-                continue
-            if account.runtime and account.runtime.state == "auth_expired":
-                await self.handle_auth_expired(
-                    account.account_id,
-                    source="im_runtime",
-                    message=account.runtime.message or "IM 运行时认证失效",
-                )
                 continue
             if status.next_attempt_at is None:
                 scheduled = await self._store.reschedule_cookie_renewal(
@@ -362,6 +449,14 @@ class CookieRenewalManager:
         jitter_seconds = random.uniform(0, min(self._interval.total_seconds() * 0.1, 3600))
         return utcnow() + self._interval + timedelta(seconds=jitter_seconds)
 
+    def _next_keepalive_recheck(self) -> datetime:
+        return utcnow() + timedelta(
+            seconds=random.uniform(
+                self._keepalive_recheck_min_seconds,
+                self._keepalive_recheck_max_seconds,
+            )
+        )
+
     def _recent_success_defer_until(
         self,
         account: AccountRecord,
@@ -406,6 +501,7 @@ class CookieRenewalManager:
         if current is completed:
             self._tasks.pop(account_id, None)
             self._trigger_sources.pop(account_id, None)
+            self._previous_error_kinds.pop(account_id, None)
 
     async def _start_keepalive_if_due(
         self,
@@ -441,33 +537,12 @@ class CookieRenewalManager:
             return
         self._last_keepalive_at[account_id] = utcnow()
         try:
-            try:
-                account_network_mode(account)
-            except AccountNetworkPolicyError as exc:
-                raise CookieRenewalError(str(exc), kind="proxy_failed") from exc
-            async with self._renewal_slot:
-                result = await run_platform_blocking(
-                    self._invoke_identity_aware,
-                    self._service.keep_alive,
-                    account.cookie,
-                    account.proxy,
-                    account.client_identity,
-                )
-            status, persisted = await self._store.record_cookie_validation(
-                account_id,
-                expected_cookie=account.cookie,
-                new_cookie=result.new_cookie,
-                source="cookie_keepalive",
-                message=result.message,
-            )
-            if not persisted:
-                return
-            if result.new_cookie != account.cookie:
-                with suppress(Exception):
-                    await self._runtime_manager.replace_cookie(account_id, result.new_cookie)
-            if status is not None:
-                await self._publish_status(status)
+            result = await self._probe_keepalive(account)
+            await self._persist_keepalive_result(account, result)
         except CookieRenewalError as exc:
+            if exc.kind == "suspected_expired":
+                await self._recheck_suspected_keepalive(account, exc)
+                return
             if exc.kind == "auth_expired":
                 await self.handle_auth_expired(
                     account_id,
@@ -483,6 +558,85 @@ class CookieRenewalManager:
             )
         except Exception:
             logger.exception("Cookie keepalive failed for account %s", account_id)
+
+    async def _probe_keepalive(self, account: AccountRecord) -> Any:
+        return await self._probe_cookie(account, account.cookie)
+
+    async def _probe_cookie(self, account: AccountRecord, cookie: str) -> Any:
+        try:
+            account_network_mode(account)
+        except AccountNetworkPolicyError as exc:
+            raise CookieRenewalError(str(exc), kind="proxy_failed") from exc
+        async with self._renewal_slot:
+            return await run_platform_blocking(
+                self._invoke_identity_aware,
+                self._service.keep_alive,
+                cookie,
+                account.proxy,
+                account.client_identity,
+            )
+
+    async def _persist_keepalive_result(self, account: AccountRecord, result: Any) -> None:
+        await self.persist_validated_cookie(
+            account,
+            expected_cookie=account.cookie,
+            result=result,
+            source="cookie_keepalive",
+            message=result.message,
+        )
+
+    async def _recheck_suspected_keepalive(
+        self,
+        account: AccountRecord,
+        first_error: CookieRenewalError,
+    ) -> None:
+        delay_seconds = random.uniform(
+            self._keepalive_recheck_min_seconds,
+            self._keepalive_recheck_max_seconds,
+        )
+        runtime_state = account.runtime.state if account.runtime else "error"
+        await self._store.add_runtime_event(
+            account.account_id,
+            runtime_state,
+            (
+                f"Cookie 轻量验证首次疑似失效，{delay_seconds:.0f} 秒后复核："
+                f"{first_error}"
+            ),
+        )
+        await asyncio.sleep(delay_seconds)
+        latest = await self._store.get_account(account.account_id)
+        if latest is None or not latest.enabled or not latest.cookie:
+            return
+        try:
+            result = await self._probe_keepalive(latest)
+        except asyncio.CancelledError:
+            raise
+        except CookieRenewalError as exc:
+            if exc.kind in {"suspected_expired", "auth_expired"}:
+                await self._store.add_runtime_event(
+                    latest.account_id,
+                    latest.runtime.state if latest.runtime else "error",
+                    "Cookie 轻量验证连续两次疑似失效，启动 Passport/MTOP Web 交叉验证",
+                )
+                await self.handle_auth_expired(
+                    latest.account_id,
+                    source="cookie_keepalive",
+                    message=str(exc),
+                )
+                return
+            await self._store.add_runtime_event(
+                latest.account_id,
+                latest.runtime.state if latest.runtime else "error",
+                f"Cookie 延迟复核未完成：{exc}",
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Cookie delayed keepalive recheck failed for account %s",
+                latest.account_id,
+            )
+            return
+        await self._persist_keepalive_result(latest, result)
 
     def _discard_keepalive_task(
         self,

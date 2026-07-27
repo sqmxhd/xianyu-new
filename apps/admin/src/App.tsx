@@ -162,6 +162,7 @@ import {
   listAutoReplyRules,
   listAggregateConversations,
   listCachedMessages,
+  getChatwootConfig,
   getOrder,
   getPlatformBlacklist,
   listConversationOrders,
@@ -209,6 +210,7 @@ import {
   recallMessage,
   revealAccountCookie,
   sendText,
+  saveChatwootConfig,
   setManualTakeover,
   setPlatformBlacklist,
   startAccount,
@@ -219,6 +221,7 @@ import {
   stopBrowserProfile,
   startXianyuQRLogin,
   testBark,
+  testChatwootConfig,
   testProxy,
   updateAccount,
   updateAccountAutoReply,
@@ -310,6 +313,8 @@ import type {
   BrowserEngine,
   BrowserRuntimeSetting,
   ChatMessage,
+  ChatwootConfig,
+  ChatwootConfigFormValues,
   Conversation,
   ConversationAccountSync,
   CookieRenewalStatus,
@@ -368,6 +373,7 @@ type ConversationStatusFilter = "all" | "unread";
 type PendingImageStatus = "queued" | "sending" | "sent" | "failed";
 type AccountWorkspaceVisibilityField =
   | "conversation_visible"
+  | "chat_enabled"
   | "order_management_visible"
   | "product_management_visible";
 type PendingImage = {
@@ -616,6 +622,8 @@ const cookieSourceLabels: Record<string, string> = {
   scheduled_renewal: "定时续期",
   auth_recovery: "认证恢复",
   cookie_keepalive: "轻量保活",
+  account_browser: "VNC 浏览器",
+  account_browser_local_validation: "VNC 本地复核",
   legacy: "历史数据"
 };
 
@@ -657,6 +665,20 @@ const accountBrowserStateMeta: Record<
   closed: { label: "已关闭", color: "default" },
   expired: { label: "已超时", color: "default" },
   failed: { label: "启动失败", color: "red" }
+};
+
+const accountBrowserCookieSyncMeta: Record<
+  AccountBrowserSession["cookie_sync_status"],
+  { label: string; color: string }
+> = {
+  pending: { label: "Cookie 待核对", color: "default" },
+  updated_from_browser: { label: "浏览器 Cookie 已更新", color: "green" },
+  refreshed_from_browser: { label: "浏览器 Cookie 已验证", color: "green" },
+  kept_local: { label: "已保留本地 Cookie", color: "blue" },
+  auth_recovery: { label: "正在认证恢复", color: "orange" },
+  account_mismatch: { label: "账号不一致", color: "red" },
+  unknown: { label: "Cookie 待复核", color: "gold" },
+  failed: { label: "Cookie 核对失败", color: "red" }
 };
 
 const browserProfileStateMeta: Record<
@@ -794,7 +816,7 @@ const ACCOUNT_TABLE_COLUMN_WIDTHS = {
   account: 220,
   proxy: 376,
   cookie: 116,
-  toggles: 128,
+  toggles: 176,
   recentOnline: 92,
   messageCount: 60,
   remark: 150,
@@ -983,7 +1005,10 @@ function applyCookieRenewalHealth(
     } else if (renewal.last_verified_at || account.cookie_health.checked_at) {
       cookieHealth = {
         state: "valid",
-        message: "Cookie 最近一次平台验证有效；本次续期未完成",
+        message:
+          renewal.last_error_kind === "suspected_expired"
+            ? renewal.message || "Cookie 最近一次验证有效；当前状态正在后台复核"
+            : "Cookie 最近一次平台验证有效；本次续期未完成",
         checked_at: renewal.last_verified_at || account.cookie_health.checked_at,
         ...healthMetadata
       };
@@ -1558,20 +1583,20 @@ interface UserSubmissionSnapshot {
 type SettingsTabKey =
   | "users"
   | "proxies"
+  | "message-services"
   | "browsers"
   | "addresses"
   | "ai"
-  | "notifications"
   | "tasks"
   | "audit";
 
 const settingsTabLabels: Record<SettingsTabKey, string> = {
   users: "用户与登录",
   proxies: "代理管理",
+  "message-services": "消息服务",
   browsers: "浏览器运行环境",
   addresses: "地址库",
   ai: "AI 服务",
-  notifications: "通知设置",
   tasks: "后台任务",
   audit: "审计日志"
 };
@@ -1680,6 +1705,10 @@ export default function App() {
   const [accountTableWidth, setAccountTableWidth] = useState(0);
   const [proxyDrawerOpen, setProxyDrawerOpen] = useState(false);
   const [editingProxy, setEditingProxy] = useState<ProxyResource | null>(null);
+  const [chatwootConfig, setChatwootConfig] = useState<ChatwootConfig | null>(null);
+  const [chatwootLoading, setChatwootLoading] = useState(false);
+  const [chatwootSaving, setChatwootSaving] = useState(false);
+  const [chatwootTesting, setChatwootTesting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [recoveringAccountId, setRecoveringAccountId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1947,6 +1976,8 @@ export default function App() {
   ) ?? "system_chromium";
   const selectedBrowserIdentity = Form.useWatch("browser_identity", form);
   const [proxyForm] = Form.useForm<ProxyFormValues>();
+  const [chatwootForm] = Form.useForm<ChatwootConfigFormValues>();
+  const chatwootCallbackUrlValue = Form.useWatch("callback_url", chatwootForm);
   const [barkForm] = Form.useForm<BarkConfig & { test_title: string; test_body: string }>();
   const [sendForm] = Form.useForm<SendTextFormValues>();
   const [quickPhraseForm] = Form.useForm<QuickPhraseFormValues>();
@@ -3218,7 +3249,10 @@ export default function App() {
       const tab = settingsTabFromSearch(location.search, isAdmin, canMutate);
       if (tab === "users") void loadUsers();
       if (tab === "browsers") void loadBrowserRuntime();
-      if (tab === "notifications") void loadBarkConfig();
+      if (tab === "message-services") {
+        void loadBarkConfig();
+        void loadChatwootData();
+      }
       if (tab === "audit") void loadAuditLogs();
       if (tab === "ai") void loadAIProviderData();
       if (tab === "tasks") void loadBackgroundTaskData();
@@ -3728,7 +3762,15 @@ export default function App() {
       updateAccountBrowserStatus(null, session.account_id);
       if (requestId !== accountBrowserRequestRef.current) return;
       setAccountBrowserSession(current);
-      message.success("平台账户浏览器已关闭");
+      if (
+        ["auth_recovery", "account_mismatch", "unknown", "failed"].includes(
+          current.cookie_sync_status
+        )
+      ) {
+        message.warning(current.message || "平台账户浏览器已关闭，Cookie 状态需要复核");
+      } else {
+        message.success(current.message || "平台账户浏览器已关闭");
+      }
     } catch (error) {
       if (requestId === accountBrowserRequestRef.current) {
         message.error(error instanceof Error ? error.message : "平台账户浏览器关闭失败");
@@ -4457,9 +4499,13 @@ export default function App() {
         return next;
       });
       message.success(
-        visible
-          ? `已在${workspaceLabel}显示该账户`
-          : `已从${workspaceLabel}隐藏，账户连接与自动回复不受影响`
+        field === "chat_enabled"
+          ? visible
+            ? "已开启该账户的 Chatwoot 消息同步"
+            : "已关闭该账户的 Chatwoot 消息同步，历史映射保留"
+          : visible
+            ? `已在${workspaceLabel}显示该账户`
+            : `已从${workspaceLabel}隐藏，账户连接与自动回复不受影响`
       );
     } catch (error) {
       message.error(error instanceof Error ? error.message : `更新${workspaceLabel}显示设置失败`);
@@ -5326,6 +5372,75 @@ export default function App() {
       message.error(error instanceof Error ? error.message : "加载 AI 服务配置失败");
     } finally {
       setAIProviderLoading(false);
+    }
+  }
+
+  async function loadChatwootData() {
+    setChatwootLoading(true);
+    try {
+      const result = await getChatwootConfig();
+      setChatwootConfig(result);
+      chatwootForm.setFieldsValue({
+        enabled: result.enabled,
+        base_url: result.base_url,
+        inbox_identifier: result.inbox_identifier,
+        callback_url: result.callback_url,
+        webhook_secret: result.webhook_secret,
+        client_hmac_token: result.client_hmac_token || "",
+        clear_client_hmac_token: false,
+        chatwoot_account_id: result.chatwoot_account_id ?? null,
+        api_access_token: result.api_access_token || "",
+        clear_api_access_token: false
+      });
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "加载 Chatwoot 配置失败");
+    } finally {
+      setChatwootLoading(false);
+    }
+  }
+
+  async function saveChatwootConfiguration() {
+    const values = await chatwootForm.validateFields();
+    setChatwootSaving(true);
+    try {
+      const saved = await saveChatwootConfig({
+        ...values,
+        webhook_secret: values.webhook_secret || undefined,
+        client_hmac_token: values.client_hmac_token || undefined,
+        api_access_token: values.api_access_token || undefined
+      });
+      setChatwootConfig(saved);
+      chatwootForm.setFieldsValue({
+        enabled: saved.enabled,
+        base_url: saved.base_url,
+        inbox_identifier: saved.inbox_identifier,
+        callback_url: saved.callback_url,
+        webhook_secret: saved.webhook_secret,
+        client_hmac_token: saved.client_hmac_token || "",
+        clear_client_hmac_token: false,
+        chatwoot_account_id: saved.chatwoot_account_id ?? null,
+        api_access_token: saved.api_access_token || "",
+        clear_api_access_token: false
+      });
+      message.success("Chatwoot 配置已保存");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "保存 Chatwoot 配置失败");
+    } finally {
+      setChatwootSaving(false);
+    }
+  }
+
+  async function runChatwootTest() {
+    setChatwootTesting(true);
+    try {
+      const result = await testChatwootConfig();
+      message.success(result.message);
+      await loadChatwootData();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Chatwoot 连接测试失败");
+      await loadChatwootData();
+    } finally {
+      setChatwootTesting(false);
     }
   }
 
@@ -7663,27 +7778,11 @@ export default function App() {
         hidden: !showAccountToggles,
         render: (_, account) => {
           const conversationKey = `${account.account_id}:conversation_visible`;
+          const chatKey = `${account.account_id}:chat_enabled`;
           const orderKey = `${account.account_id}:order_management_visible`;
           const productKey = `${account.account_id}:product_management_visible`;
           return (
             <div className="account-feature-switches">
-              <Switch
-                size="small"
-                disabled={!canMutate}
-                checked={account.notification_enabled}
-                checkedChildren="通知"
-                unCheckedChildren="通知"
-                onChange={(checked) => void runToggleNotification(account, checked)}
-              />
-              <Switch
-                size="small"
-                disabled={!canMutate || accountAutoReplyUpdatingId === account.account_id}
-                loading={accountAutoReplyUpdatingId === account.account_id}
-                checked={account.auto_reply_enabled}
-                checkedChildren="回复"
-                unCheckedChildren="回复"
-                onChange={(checked) => void runToggleAccountAutoReply(account, checked)}
-              />
               <Tooltip title="仅控制会话消息页面展示，不影响 IM 连接、Cookie 或自动回复">
                 <Switch
                   size="small"
@@ -7697,19 +7796,37 @@ export default function App() {
                   }
                 />
               </Tooltip>
-              <Tooltip title="仅控制订单管理页面展示，不影响账户连接或同步设置">
+              <Tooltip title="控制该账户是否接入平台级 Chatwoot；关闭后停止双向消息与状态同步，历史映射保留">
                 <Switch
+                  className="account-chat-switch"
                   size="small"
-                  disabled={!canMutate || accountWorkspaceVisibilityUpdatingKeys.has(orderKey)}
-                  loading={accountWorkspaceVisibilityUpdatingKeys.has(orderKey)}
-                  checked={account.order_management_visible}
-                  checkedChildren="订单"
-                  unCheckedChildren="订单"
+                  disabled={!canMutate || accountWorkspaceVisibilityUpdatingKeys.has(chatKey)}
+                  loading={accountWorkspaceVisibilityUpdatingKeys.has(chatKey)}
+                  checked={account.chat_enabled}
+                  checkedChildren="Chat"
+                  unCheckedChildren="Chat"
                   onChange={(checked) =>
-                    void runToggleAccountWorkspaceVisibility(account, "order_management_visible", checked, "订单管理")
+                    void runToggleAccountWorkspaceVisibility(account, "chat_enabled", checked, "Chat")
                   }
                 />
               </Tooltip>
+              <Switch
+                size="small"
+                disabled={!canMutate || accountAutoReplyUpdatingId === account.account_id}
+                loading={accountAutoReplyUpdatingId === account.account_id}
+                checked={account.auto_reply_enabled}
+                checkedChildren="回复"
+                unCheckedChildren="回复"
+                onChange={(checked) => void runToggleAccountAutoReply(account, checked)}
+              />
+              <Switch
+                size="small"
+                disabled={!canMutate}
+                checked={account.notification_enabled}
+                checkedChildren="通知"
+                unCheckedChildren="通知"
+                onChange={(checked) => void runToggleNotification(account, checked)}
+              />
               <Tooltip title="仅控制商品管理页面展示，不影响账户连接或同步设置">
                 <Switch
                   size="small"
@@ -7720,6 +7837,19 @@ export default function App() {
                   unCheckedChildren="商品"
                   onChange={(checked) =>
                     void runToggleAccountWorkspaceVisibility(account, "product_management_visible", checked, "商品管理")
+                  }
+                />
+              </Tooltip>
+              <Tooltip title="仅控制订单管理页面展示，不影响账户连接或同步设置">
+                <Switch
+                  size="small"
+                  disabled={!canMutate || accountWorkspaceVisibilityUpdatingKeys.has(orderKey)}
+                  loading={accountWorkspaceVisibilityUpdatingKeys.has(orderKey)}
+                  checked={account.order_management_visible}
+                  checkedChildren="订单"
+                  unCheckedChildren="订单"
+                  onChange={(checked) =>
+                    void runToggleAccountWorkspaceVisibility(account, "order_management_visible", checked, "订单管理")
                   }
                 />
               </Tooltip>
@@ -9938,11 +10068,12 @@ export default function App() {
                               ) : null}
                             </Space>
                           </div>
+                          {renderChatMessageContent(chatMessage, privacyMaskEnabled)}
                           {chatMessage.recalled_at ? (
-                            <Text type="secondary">消息已撤回</Text>
-                          ) : (
-                            renderChatMessageContent(chatMessage, privacyMaskEnabled)
-                          )}
+                            <div className="message-recall-state">
+                              <Tag>已撤回</Tag>
+                            </div>
+                          ) : null}
                         </div>
                         {chatMessage.direction === "outbound" ? (
                           <Tooltip
@@ -12864,6 +12995,210 @@ export default function App() {
     );
   }
 
+  function renderMessageServicesPage() {
+    const chatwootStatusColor =
+      chatwootConfig?.status === "error"
+        ? "red"
+        : chatwootConfig?.status === "degraded"
+          ? "orange"
+        : chatwootConfig?.status === "online" || chatwootConfig?.status === "ready"
+          ? "blue"
+          : "default";
+    return (
+      <Space direction="vertical" size={12} className="content-stack">
+        <Card
+          title={
+            <Space size={6} wrap>
+              <span>Chatwoot</span>
+              <Tag color="blue">平台级</Tag>
+              {chatwootConfig ? (
+                <>
+                  <Tag color={chatwootConfig.enabled ? "green" : "default"}>
+                    {chatwootConfig.enabled ? "已启用" : "已停用"}
+                  </Tag>
+                  <Tag color={chatwootStatusColor}>{chatwootConfig.status}</Tag>
+                  <Tag color={chatwootConfig.full_outbound_sync_enabled ? "green" : "orange"}>
+                    {chatwootConfig.full_outbound_sync_enabled ? "完整回写" : "基础链路"}
+                  </Tag>
+                  <Tag color={chatwootConfig.account_grouping_enabled ? "green" : "orange"}>
+                    {chatwootConfig.account_grouping_enabled
+                      ? `账号分组 ${chatwootConfig.managed_inbox_count}`
+                      : "账号分组待凭据"}
+                  </Tag>
+                  <Tag>
+                    {accounts.filter((account) => account.chat_enabled).length} 个账户开启 Chat
+                  </Tag>
+                </>
+              ) : (
+                <Tag color="orange">尚未配置</Tag>
+              )}
+            </Space>
+          }
+          loading={chatwootLoading}
+          extra={
+            <Button
+              icon={<SyncOutlined />}
+              onClick={() => void loadChatwootData()}
+            >
+              刷新
+            </Button>
+          }
+        >
+          <Form
+            form={chatwootForm}
+            layout="vertical"
+            className="chatwoot-config-form"
+            initialValues={{
+              enabled: false,
+              clear_client_hmac_token: false,
+              clear_api_access_token: false
+            }}
+          >
+            <div className="chatwoot-config-grid">
+              <Form.Item
+                name="enabled"
+                label="启用 Chatwoot"
+                valuePropName="checked"
+              >
+                <Switch checkedChildren="已启用" unCheckedChildren="已停用" />
+              </Form.Item>
+              <Form.Item label="当前链路">
+                <Space size={6} wrap className="chatwoot-config-status">
+                  <Tag color={chatwootConfig?.has_webhook_secret ? "green" : "red"}>
+                    Webhook {chatwootConfig?.has_webhook_secret ? "已配置" : "未配置"}
+                  </Tag>
+                  <Tag color={chatwootConfig?.full_outbound_sync_enabled ? "green" : "orange"}>
+                    {chatwootConfig?.full_outbound_sync_enabled ? "完整双向同步" : "基础链路"}
+                  </Tag>
+                  <Tag color={chatwootConfig?.account_grouping_enabled ? "green" : "orange"}>
+                    {chatwootConfig?.account_grouping_enabled
+                      ? `${chatwootConfig?.managed_inbox_count ?? 0} 个账号 Inbox`
+                      : "账号分组待凭据"}
+                  </Tag>
+                </Space>
+              </Form.Item>
+              <Form.Item
+                name="base_url"
+                label="Chatwoot 地址"
+                rules={[{ required: true, message: "请输入 Chatwoot 地址" }]}
+              >
+                <Input placeholder="https://192.168.201.2" />
+              </Form.Item>
+              <Form.Item
+                name="inbox_identifier"
+                label="收件箱标识符"
+                rules={[{ required: true, message: "请输入 API Inbox 标识符" }]}
+              >
+                <Input />
+              </Form.Item>
+              <Form.Item
+                name="callback_url"
+                label="Webhook 地址"
+                className="chatwoot-config-span-2"
+                extra="在 Chatwoot API Inbox 中填写此回调地址"
+                rules={[
+                  { required: true, message: "请输入 Webhook 地址" },
+                  { type: "url", message: "请输入完整的 http:// 或 https:// 地址" }
+                ]}
+              >
+                <Input
+                  placeholder="https://192.168.2.3/api/integrations/chatwoot/webhook"
+                  suffix={
+                    chatwootCallbackUrlValue ? (
+                      <Text copyable={{ text: chatwootCallbackUrlValue }} />
+                    ) : null
+                  }
+                />
+              </Form.Item>
+              <Form.Item
+                name="webhook_secret"
+                label="Webhook 秘密"
+                extra="管理页面直接显示；服务端数据库仍加密存储"
+                rules={[
+                  {
+                    validator: (_, value) =>
+                      value
+                        ? Promise.resolve()
+                        : Promise.reject(new Error("请输入 Webhook 秘密"))
+                  }
+                ]}
+              >
+                <Input autoComplete="off" />
+              </Form.Item>
+              <Form.Item
+                name="client_hmac_token"
+                label="客户端身份 HMAC Token"
+                extra="可选，仅在 Chatwoot API Inbox 启用身份验证时填写"
+              >
+                <Input autoComplete="off" />
+              </Form.Item>
+              {chatwootConfig?.has_client_hmac_token ? (
+                <Form.Item
+                  name="clear_client_hmac_token"
+                  label="清除客户端 HMAC Token"
+                  valuePropName="checked"
+                >
+                  <Switch checkedChildren="保存时清除" unCheckedChildren="保留" />
+                </Form.Item>
+              ) : null}
+              <Form.Item name="chatwoot_account_id" label="Chatwoot 平台账户 ID">
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item
+                name="api_access_token"
+                label="专用服务账号令牌"
+                extra="账号标签、手机端账号分组、在线状态及自动创建账号 Inbox 必填；请使用 Chatwoot 管理员专用服务账号"
+              >
+                <Input autoComplete="off" />
+              </Form.Item>
+              {chatwootConfig?.has_api_access_token ? (
+                <Form.Item
+                  name="clear_api_access_token"
+                  label="清除服务账号令牌"
+                  valuePropName="checked"
+                >
+                  <Switch checkedChildren="保存时清除" unCheckedChildren="保留" />
+                </Form.Item>
+              ) : null}
+              <Form.Item label="同步记录">
+                <Space direction="vertical" size={2}>
+                  <Text type="secondary">最近推送：{formatTime(chatwootConfig?.last_push_at)}</Text>
+                  <Text type="secondary">最近回调：{formatTime(chatwootConfig?.last_webhook_at)}</Text>
+                </Space>
+              </Form.Item>
+            </div>
+            <div className="chatwoot-config-actions">
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={chatwootSaving}
+                onClick={() => void saveChatwootConfiguration()}
+              >
+                保存配置
+              </Button>
+              <Button
+                loading={chatwootTesting}
+                disabled={!chatwootConfig}
+                onClick={() => void runChatwootTest()}
+              >
+                测试连接
+              </Button>
+            </div>
+          </Form>
+        </Card>
+        {chatwootConfig?.last_error ? (
+          <Alert
+            type="error"
+            showIcon
+            message="最近一次同步失败"
+            description={chatwootConfig.last_error}
+          />
+        ) : null}
+        {renderNotificationsPage()}
+      </Space>
+    );
+  }
+
   function renderAIProviderPage() {
     return (
       <Card
@@ -13170,7 +13505,7 @@ export default function App() {
     if (activeTab === "browsers") return renderBrowserRuntimePage();
     if (activeTab === "addresses") return renderAddressLibraryPage();
     if (activeTab === "ai") return renderAIProviderPage();
-    if (activeTab === "notifications") return renderNotificationsPage();
+    if (activeTab === "message-services") return renderMessageServicesPage();
     if (activeTab === "tasks") return renderTasksPage();
     if (activeTab === "audit") return renderAuditPage();
     return renderUsersPage();
@@ -13186,8 +13521,8 @@ export default function App() {
     ...(isAdmin
       ? [
           { key: "settings:ai", label: settingsTabLabels.ai },
+          { key: "settings:message-services", label: settingsTabLabels["message-services"] },
           { key: "settings:browsers", label: settingsTabLabels.browsers },
-          { key: "settings:notifications", label: settingsTabLabels.notifications },
           { key: "settings:tasks", label: settingsTabLabels.tasks },
           { key: "settings:audit", label: settingsTabLabels.audit }
         ]
@@ -13363,7 +13698,7 @@ export default function App() {
             <Route path="/products" element={<Navigate to="/product-management" replace />} />
             <Route path="/events" element={<Navigate to="/accounts" replace />} />
             <Route path="/tasks" element={<Navigate to="/settings?tab=tasks" replace />} />
-            <Route path="/notifications" element={<Navigate to="/settings?tab=notifications" replace />} />
+            <Route path="/notifications" element={<Navigate to="/settings?tab=message-services" replace />} />
             <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
             <Route path="/settings" element={renderSettingsPage()} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
@@ -13761,6 +14096,12 @@ export default function App() {
                   <Tag color={accountBrowserSession.cdp_available ? "green" : "default"}>
                     {accountBrowserSession.cdp_available ? "本机 CDP 已开启" : "CDP 未开启"}
                   </Tag>
+                  {accountBrowserSession.cookie_sync_status &&
+                  accountBrowserSession.cookie_sync_status !== "pending" ? (
+                    <Tag color={accountBrowserCookieSyncMeta[accountBrowserSession.cookie_sync_status].color}>
+                      {accountBrowserCookieSyncMeta[accountBrowserSession.cookie_sync_status].label}
+                    </Tag>
+                  ) : null}
                   <Tag color={browserFingerprintDetectionMeta(
                     accountBrowserSession.fingerprint_snapshot
                       ?? accountBrowserAccount?.browser_identity?.fingerprint_snapshot,

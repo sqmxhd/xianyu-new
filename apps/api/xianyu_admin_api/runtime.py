@@ -1074,6 +1074,86 @@ class AccountRuntimeManager:
         conversation_id: str,
         payload: SendTextPayload,
     ) -> SendTextResultPayload:
+        if payload.client_request_id:
+            pending, created = await self._store.begin_outbound_text(
+                account_id=account.account_id,
+                conversation_id=conversation_id,
+                client_request_id=payload.client_request_id,
+                peer_user_id=payload.receiver_user_id,
+                text=payload.text,
+            )
+            if pending is None:
+                return SendTextResultPayload(
+                    success=False,
+                    account_id=account.account_id,
+                    conversation_id=conversation_id,
+                    client_request_id=payload.client_request_id,
+                    error="failed to create the outbound text record",
+                )
+            if not created:
+                return SendTextResultPayload(
+                    success=pending.send_status == "sent",
+                    account_id=account.account_id,
+                    conversation_id=conversation_id,
+                    client_request_id=payload.client_request_id,
+                    message_id=pending.message_id,
+                    error=(
+                        pending.send_error
+                        if pending.send_status == "failed"
+                        else None
+                        if pending.send_status == "sent"
+                        else "text send is already in progress"
+                    ),
+                    message=pending,
+                )
+            await self._after_message_persisted(
+                pending,
+                account_id=account.account_id,
+                conversation_id=conversation_id,
+                direction="outbound",
+            )
+            core = self._core
+            if core is None:
+                result_success = False
+                result_message_id = None
+                result_error = "account runtime is not running"
+                result_raw: object | None = None
+            else:
+                result = await core.send_text(
+                    account.account_id,
+                    conversation_id,
+                    payload.receiver_user_id,
+                    payload.text,
+                )
+                result_success = bool(getattr(result, "success", False))
+                result_message_id = getattr(result, "message_id", None)
+                result_error = getattr(result, "error", None)
+                result_raw = getattr(result, "raw_payload", None)
+            message = await self._store.complete_outbound_text(
+                account_id=account.account_id,
+                client_request_id=payload.client_request_id,
+                success=result_success,
+                message_id=result_message_id,
+                error=result_error,
+                raw_payload=result_raw,
+            )
+            if message is not None:
+                await self._after_message_persisted(
+                    message,
+                    account_id=account.account_id,
+                    conversation_id=conversation_id,
+                    direction="outbound",
+                )
+            return SendTextResultPayload(
+                success=result_success,
+                account_id=account.account_id,
+                conversation_id=conversation_id,
+                client_request_id=payload.client_request_id,
+                message_id=result_message_id,
+                error=result_error,
+                message=message,
+            )
+
         core = self._core
         if core is None:
             message = await self._store.record_message(
@@ -1773,6 +1853,17 @@ class AccountRuntimeManager:
         direction: str,
         message_type: str,
     ) -> Any:
+        attachments = [
+            {
+                "attachment_type": str(
+                    getattr(item, "attachment_type", "") or ""
+                ),
+                "remote_url": str(getattr(item, "remote_url", "") or ""),
+                "mime_type": getattr(item, "mime_type", None),
+                "size_bytes": getattr(item, "size_bytes", None),
+            }
+            for item in (getattr(event, "attachments", None) or [])
+        ]
         return await self._store.record_message(
             account_id=account_id,
             conversation_id=conversation_id,
@@ -1785,6 +1876,7 @@ class AccountRuntimeManager:
             item_id=getattr(event, "item_id", None),
             raw_payload=getattr(event, "raw_payload", None),
             created_at_ms=getattr(event, "created_at_ms", None),
+            attachments=attachments,
         )
 
     async def _retry_message_persistence(
@@ -1883,6 +1975,22 @@ class AccountRuntimeManager:
                 await self._record_processing_error(
                     account_id,
                     "会话实时事件发布失败",
+                    exc,
+                )
+            try:
+                from .chatwoot import enqueue_local_message_sync
+
+                await enqueue_local_message_sync(
+                    self._store,
+                    account_id=account_id,
+                    message_pk=message.message_pk,
+                    send_status=getattr(message, "send_status", None),
+                    recalled=getattr(message, "recalled_at", None) is not None,
+                )
+            except Exception as exc:
+                await self._record_processing_error(
+                    account_id,
+                    "Chatwoot 消息同步入队失败",
                     exc,
                 )
         if message and direction == "inbound":
@@ -1991,18 +2099,27 @@ class AccountRuntimeManager:
                     "data": account.runtime.to_payload().model_dump(mode="json"),
                 }
             )
+        try:
+            from .chatwoot import enqueue_account_status_sync
+
+            await enqueue_account_status_sync(
+                self._store,
+                account_id=account_id,
+                state=state_value,
+                message=message,
+            )
+        except Exception as exc:
+            await self._record_processing_error(
+                account_id,
+                "Chatwoot 账户状态同步入队失败",
+                exc,
+            )
         if state_value == "online":
             self._track_maintenance_task(
                 asyncio.create_task(
                     self._warm_conversations(account_id),
                     name=f"xianyu-warm-conversations:{account_id}",
                 )
-            )
-        elif state_value == "auth_expired":
-            await self._report_cookie_auth_failure(
-                account_id,
-                "im_runtime",
-                message or "IM 运行时认证失效",
             )
 
     async def _handle_verification(

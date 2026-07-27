@@ -22,11 +22,12 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
+from apps.runtime_paths import resource_path
+
 from .protocol_worker import get_protocol_decryptor
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_UPSTREAM_ROOT = REPO_ROOT / "third_party" / "XianYuApis"
+DEFAULT_UPSTREAM_ROOT = resource_path("third_party", "XianYuApis")
 
 _UPSTREAM_MODULE_NAMES = (
     "goofish_apis",

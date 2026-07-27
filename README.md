@@ -36,6 +36,24 @@ npm run dev:hot
 npm test
 ```
 
+## 打包与容器
+
+GitLab 三阶段流水线、Linux/Windows 二进制包和 Docker Compose 的说明见
+[`docs/packaging.md`](docs/packaging.md)。
+
+本地 Linux 打包：
+
+```bash
+bash tools/package/build_linux.sh
+```
+
+Docker HTTPS 部署：
+
+```bash
+cp .env.docker.example .env.docker
+docker compose --env-file .env.docker up -d --build
+```
+
 ## 配置文件
 
 - `.env.example`：提交到 git 的模板。

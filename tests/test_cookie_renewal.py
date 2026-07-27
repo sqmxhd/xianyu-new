@@ -66,6 +66,7 @@ class _RenewalSession(requests.Session):
             response.cookies.set("havana_lgc2_77", "long-token", domain=".goofish.com", path="/")
         elif url == MTOP_NAV_URL:
             response.cookies.set("_m_h5_tk", "new-mtop-token", domain=".goofish.com", path="/")
+            response._content = b'{"ret":["SUCCESS::call succeeds"],"data":{}}'
         return response
 
 
@@ -100,13 +101,9 @@ class CookieRenewalServiceTests(unittest.TestCase):
             {"unb": "123", "token": "a=b=c"},
         )
 
-    def test_http_chain_renews_and_validates_cookie(self) -> None:
+    def test_http_chain_renews_and_validates_web_cookie(self) -> None:
         http = _RenewalSession()
-        validated: list[dict[str, str]] = []
-        service = CookieRenewalService(
-            session_factory=lambda: http,
-            access_token_validator=lambda _http, cookies: validated.append(dict(cookies)),
-        )
+        service = CookieRenewalService(session_factory=lambda: http)
 
         result = service.renew(
             "unb=seller-1; _m_h5_tk=old-token; cookie2=session; sgcookie=old",
@@ -125,16 +122,14 @@ class CookieRenewalServiceTests(unittest.TestCase):
             [HAS_LOGIN_URL, SILENT_HAS_LOGIN_URL, SET_LOGIN_SETTINGS_URL, MTOP_NAV_URL],
         )
         self.assertEqual(http.proxies["https"], "socks5h://user%40name:p%3Aa@127.0.0.1:1080")
-        self.assertEqual(validated[0]["unb"], "seller-1")
-        self.assertEqual(validated[0]["sgcookie"], "renewed")
         self.assertIn("_m_h5_tk=new-mtop-token", result.new_cookie)
         self.assertIn("havana_lgc2_77", result.updated_cookie_names)
+        self.assertIn("Web Cookie 交叉验证", result.message)
         self.assertNotIn("new-mtop-token", result.message)
 
     def test_changed_account_is_rejected(self) -> None:
         service = CookieRenewalService(
-            session_factory=lambda: _RenewalSession(change_account=True),
-            access_token_validator=lambda _http, _cookies: None,
+            session_factory=lambda: _RenewalSession(change_account=True)
         )
         with self.assertRaisesRegex(CookieRenewalError, "账户标识不一致"):
             service.renew("unb=seller-1; _m_h5_tk=old-token")
@@ -164,7 +159,7 @@ class CookieRenewalServiceTests(unittest.TestCase):
 
         with self.assertRaises(CookieRenewalError) as raised:
             service.keep_alive("unb=seller-1; _m_h5_tk=old-token")
-        self.assertEqual(raised.exception.kind, "auth_expired")
+        self.assertEqual(raised.exception.kind, "suspected_expired")
 
 
 class _RuntimeRecorder:
@@ -187,6 +182,36 @@ class _SuccessfulService:
 class _AuthExpiredService:
     def renew(self, _cookie: str, _proxy: ProxyConfigPayload) -> CookieRenewalResult:
         raise CookieRenewalError("登录状态已失效", kind="auth_expired")
+
+
+class _KeepaliveSequenceService:
+    def __init__(self, outcomes: list[CookieRenewalResult | CookieRenewalError]) -> None:
+        self.outcomes = list(outcomes)
+        self.keepalive_calls = 0
+        self.renew_calls = 0
+
+    def keep_alive(
+        self,
+        _cookie: str,
+        _proxy: ProxyConfigPayload,
+    ) -> CookieRenewalResult:
+        self.keepalive_calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, CookieRenewalError):
+            raise outcome
+        return outcome
+
+    def renew(
+        self,
+        _cookie: str,
+        _proxy: ProxyConfigPayload,
+    ) -> CookieRenewalResult:
+        self.renew_calls += 1
+        return CookieRenewalResult(
+            new_cookie="unb=seller-1; _m_h5_tk=confirmed-web-token",
+            updated_cookie_names=["_m_h5_tk"],
+            message="Passport/MTOP Web 交叉验证成功",
+        )
 
 
 class _UnavailableRuntime:
@@ -309,13 +334,22 @@ class CookieRenewalPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runtime.replacements), 1)
         await manager.shutdown()
 
-    async def test_failure_kind_and_reason_are_kept_in_attempt_history(self) -> None:
+    async def test_single_full_web_failure_stays_suspected_until_rechecked(self) -> None:
         manager = CookieRenewalManager(
             self.store,
             _RuntimeRecorder(),
             service=_AuthExpiredService(),  # type: ignore[arg-type]
             enabled=False,
         )
+
+        await manager.trigger(self.account.account_id)
+        await manager._tasks[self.account.account_id]
+        status = await self.store.get_cookie_renewal_status(self.account.account_id)
+
+        self.assertEqual(status.state, "failed")
+        self.assertEqual(status.last_error_kind, "suspected_expired")
+        self.assertIsNotNone(status.next_attempt_at)
+        self.assertFalse(status.manual_action_required)
 
         await manager.trigger(self.account.account_id)
         await manager._tasks[self.account.account_id]
@@ -350,7 +384,7 @@ class CookieRenewalPersistenceTests(unittest.IsolatedAsyncioTestCase):
             interval_hours=24,
             manual_cooldown_seconds=0,
         )
-        await failing.trigger(self.account.account_id)
+        await failing.trigger(self.account.account_id, trigger="auth_recovery")
         await failing._tasks[self.account.account_id]
         status = await self.store.get_cookie_renewal_status(self.account.account_id)
 
@@ -472,6 +506,80 @@ class CookieRenewalPersistenceTests(unittest.IsolatedAsyncioTestCase):
         await manager._scan_due_accounts()
 
         manager._start_keepalive_if_due.assert_awaited_once()  # type: ignore[attr-defined]
+        await manager.shutdown()
+
+    async def test_keepalive_rechecks_once_before_accepting_recovery(self) -> None:
+        service = _KeepaliveSequenceService(
+            [
+                CookieRenewalError("首次疑似过期", kind="suspected_expired"),
+                CookieRenewalResult(
+                    new_cookie="unb=seller-1; _m_h5_tk=recovered-token",
+                    message="Cookie 延迟复核成功",
+                ),
+            ]
+        )
+        manager = CookieRenewalManager(
+            self.store,
+            _RuntimeRecorder(),
+            service=service,  # type: ignore[arg-type]
+            enabled=False,
+            keepalive_recheck_min_seconds=0,
+            keepalive_recheck_max_seconds=0,
+        )
+
+        await manager._run_keepalive(self.account.account_id)
+        status = await self.store.get_cookie_renewal_status(self.account.account_id)
+
+        self.assertEqual(service.keepalive_calls, 2)
+        self.assertEqual(service.renew_calls, 0)
+        self.assertEqual(status.last_verified_source, "cookie_keepalive")
+        self.assertFalse(status.manual_action_required)
+        await manager.shutdown()
+
+    async def test_two_keepalive_failures_start_web_only_confirmation(self) -> None:
+        service = _KeepaliveSequenceService(
+            [
+                CookieRenewalError("首次疑似过期", kind="suspected_expired"),
+                CookieRenewalError("再次疑似过期", kind="suspected_expired"),
+            ]
+        )
+        manager = CookieRenewalManager(
+            self.store,
+            _RuntimeRecorder(),
+            service=service,  # type: ignore[arg-type]
+            enabled=False,
+            keepalive_recheck_min_seconds=0,
+            keepalive_recheck_max_seconds=0,
+        )
+
+        await manager._run_keepalive(self.account.account_id)
+        await manager._tasks[self.account.account_id]
+        status = await self.store.get_cookie_renewal_status(self.account.account_id)
+
+        self.assertEqual(service.keepalive_calls, 2)
+        self.assertEqual(service.renew_calls, 1)
+        self.assertEqual(status.state, "succeeded")
+        self.assertFalse(status.manual_action_required)
+        await manager.shutdown()
+
+    async def test_im_runtime_auth_state_does_not_probe_web_cookie(self) -> None:
+        service = _KeepaliveSequenceService([])
+        manager = CookieRenewalManager(
+            self.store,
+            _RuntimeRecorder(),
+            service=service,  # type: ignore[arg-type]
+            enabled=False,
+        )
+
+        status = await manager.handle_auth_expired(
+            self.account.account_id,
+            source="im_runtime",
+            message="IM access token 已过期",
+        )
+
+        self.assertIsNotNone(status)
+        self.assertNotIn(self.account.account_id, manager._tasks)
+        self.assertEqual(service.renew_calls, 0)
         await manager.shutdown()
 
 

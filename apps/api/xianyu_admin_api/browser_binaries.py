@@ -23,6 +23,7 @@ from .schemas import (
     BrowserRuntimeSettingPayload,
     SystemBrowserPayload,
 )
+from .platform_runtime import is_root_process, system_browser_candidates
 from .settings import settings
 
 
@@ -110,19 +111,7 @@ class BrowserBinaryManager:
         if self._system_cache is not None and now - self._system_cache[0] < 30:
             return self._system_cache[1]
         configured = settings.im_verification_browser_path.strip()
-        path = configured or next(
-            (
-                found
-                for candidate in (
-                    "google-chrome-stable",
-                    "google-chrome",
-                    "chromium",
-                    "chromium-browser",
-                )
-                if (found := shutil.which(candidate))
-            ),
-            None,
-        )
+        path = configured or next(iter(system_browser_candidates()), None)
         if not path:
             result = SystemBrowserPayload(
                 available=False,
@@ -342,23 +331,33 @@ class BrowserBinaryManager:
         assets = payload.get("assets") if isinstance(payload, dict) else None
         if not isinstance(assets, list):
             raise BrowserBinaryError("官方版本信息中没有可下载文件")
+        platform_suffix = (
+            "_windows_x64.zip" if os.name == "nt" else "x86_64_linux.tar.xz"
+        )
         asset = next(
             (
                 item
                 for item in assets
                 if isinstance(item, dict)
-                and str(item.get("name") or "").endswith("x86_64_linux.tar.xz")
+                and str(item.get("name") or "").endswith(platform_suffix)
             ),
             None,
         )
         if asset is None:
-            raise BrowserBinaryError("官方最新版没有 Linux x86_64 TAR.XZ")
+            raise BrowserBinaryError(
+                "官方最新版没有当前平台可用的 Fingerprint Chromium 压缩包"
+            )
         url = str(asset.get("browser_download_url") or "")
         if not url.startswith("https://github.com/adryfish/fingerprint-chromium/releases/download/"):
             raise BrowserBinaryError("官方浏览器下载地址不受信任")
         digest = str(asset.get("digest") or "")
         expected = digest.removeprefix("sha256:") if digest.startswith("sha256:") else None
-        name = Path(str(asset.get("name") or "fingerprint-chromium.tar.xz")).name
+        default_name = (
+            "fingerprint-chromium-windows-x64.zip"
+            if os.name == "nt"
+            else "fingerprint-chromium-linux-x64.tar.xz"
+        )
+        name = Path(str(asset.get("name") or default_name)).name
         descriptor, temporary_name = tempfile.mkstemp(prefix="download-", suffix=f"-{name}", dir=self.downloads)
         os.close(descriptor)
         temporary = Path(temporary_name)
@@ -406,20 +405,26 @@ class BrowserBinaryManager:
         stable = channels.get("Stable") if isinstance(channels, dict) else None
         downloads = stable.get("downloads") if isinstance(stable, dict) else None
         chrome_assets = downloads.get("chrome") if isinstance(downloads, dict) else None
+        target_platform = "win64" if os.name == "nt" else "linux64"
         asset = next(
             (
                 item
                 for item in chrome_assets or []
-                if isinstance(item, dict) and item.get("platform") == "linux64"
+                if isinstance(item, dict) and item.get("platform") == target_platform
             ),
             None,
         )
         if asset is None:
-            raise BrowserBinaryError("Chrome for Testing Stable 没有 Linux x86_64 下载文件")
+            raise BrowserBinaryError(
+                "Chrome for Testing Stable 没有当前平台的 x64 下载文件"
+            )
         url = str(asset.get("url") or "")
         if not url.startswith(STANDARD_DOWNLOAD_PREFIX):
             raise BrowserBinaryError("Chrome for Testing 下载地址不受信任")
-        name = Path(url.rsplit("/", 1)[-1] or "chrome-linux64.zip").name
+        name = Path(
+            url.rsplit("/", 1)[-1]
+            or ("chrome-win64.zip" if os.name == "nt" else "chrome-linux64.zip")
+        ).name
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="download-",
             suffix=f"-{name}",
@@ -490,7 +495,8 @@ class BrowserBinaryManager:
     def _find_executable(root: Path) -> Path:
         candidates = [
             path
-            for path in root.rglob("chrome")
+            for executable_name in ("chrome", "chrome.exe")
+            for path in root.rglob(executable_name)
             if path.is_file() and not path.is_symlink()
         ]
         if not candidates:
@@ -527,7 +533,7 @@ class BrowserBinaryManager:
                 f"--user-data-dir={profile}",
                 "--dump-dom",
             ]
-            if os.geteuid() == 0:
+            if is_root_process():
                 command.append("--no-sandbox")
             command.append("about:blank")
             try:

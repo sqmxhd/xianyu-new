@@ -158,6 +158,44 @@ class MessageDedupeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0].message_type, "system")
         self.assertEqual(messages[0].content, "平台通知")
 
+    async def test_degraded_voice_placeholder_is_upgraded_with_attachment(self) -> None:
+        await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-audio-upgrade",
+            direction="inbound",
+            message_type="text",
+            content="[语音]",
+            message_id="message-audio-upgrade",
+        )
+
+        upgraded = await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-audio-upgrade",
+            direction="inbound",
+            message_type="audio",
+            content="[语音 2秒]",
+            message_id="message-audio-upgrade",
+            attachments=[
+                {
+                    "attachment_type": "audio",
+                    "remote_url": "https://media.aliyuncs.com/voice.amr",
+                    "mime_type": "audio/amr",
+                    "size_bytes": 4070,
+                }
+            ],
+        )
+        messages = await self.store.list_messages(
+            self.account.account_id,
+            "conversation-audio-upgrade",
+            limit=20,
+        )
+
+        self.assertIsNotNone(upgraded)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].message_type, "audio")
+        self.assertEqual(messages[0].content, "[语音 2秒]")
+        self.assertEqual(messages[0].attachments[0].attachment_type, "audio")
+
     async def test_second_precision_platform_timestamp_is_normalized(self) -> None:
         message = await self.store.record_message(
             account_id=self.account.account_id,

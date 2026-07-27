@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+from apps.runtime_paths import resource_path
 from integrations.xianyu_core.identity import DEFAULT_CLIENT_IDENTITY
 
 from .account_network import AccountNetworkPolicyError, validate_account_network_route
@@ -50,8 +51,9 @@ MTOP_HEADERS = {
     "Referer": "https://www.goofish.com/",
     "Content-Type": "application/x-www-form-urlencoded",
 }
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-TFSTK_SCRIPT = PROJECT_ROOT / "third_party" / "XianYuApis" / "utils" / "gen_tfstk.js"
+TFSTK_SCRIPT = resource_path(
+    "third_party", "XianYuApis", "utils", "gen_tfstk.js"
+)
 logger = logging.getLogger(__name__)
 
 

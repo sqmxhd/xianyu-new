@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "0.0.0.0",
-    port: 9000,
+    port: 9001,
     strictPort: true,
     proxy: {
       "/api": {
@@ -17,7 +17,7 @@ export default defineConfig({
   },
   preview: {
     host: "0.0.0.0",
-    port: 9000,
+    port: 9001,
     strictPort: true,
     proxy: {
       "/api": {

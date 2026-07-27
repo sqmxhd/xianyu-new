@@ -1,0 +1,6 @@
+services:
+  rails:
+    image: xianyu/chatwoot:4.16.0-no-outbound-audio
+
+  sidekiq:
+    image: xianyu/chatwoot:4.16.0-no-outbound-audio

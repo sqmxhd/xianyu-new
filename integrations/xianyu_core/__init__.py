@@ -7,6 +7,7 @@ changes, while business integration code remains here.
 
 from .models import (
     AccountConfig,
+    ChatMediaAttachment,
     ChatMessageEvent,
     ConversationPage,
     ConversationSummary,
@@ -53,6 +54,7 @@ from .order_operations import MtopOrderOperations
 __all__ = [
     "AccountConfig",
     "ClientIdentity",
+    "ChatMediaAttachment",
     "ChatMessageEvent",
     "ConversationPage",
     "ConversationSummary",

@@ -24,7 +24,7 @@ class BaseModel(PydanticBaseModel):
 
 
 MessageDirection = Literal["inbound", "outbound"]
-MessageType = Literal["text", "image", "card", "system", "unknown"]
+MessageType = Literal["text", "image", "audio", "card", "system", "unknown"]
 MessageSendStatus = Literal["uploading", "sending", "sent", "failed"]
 BrowserEngine = Literal["system_chromium", "fingerprint_chromium"]
 BrowserBrand = Literal["Chrome", "Edge", "Opera", "Vivaldi"]
@@ -246,6 +246,22 @@ AccountBrowserState = Literal[
     "expired",
     "failed",
 ]
+AccountBrowserCookieCheckState = Literal[
+    "not_checked",
+    "valid",
+    "invalid",
+    "unknown",
+]
+AccountBrowserCookieSyncState = Literal[
+    "pending",
+    "updated_from_browser",
+    "refreshed_from_browser",
+    "kept_local",
+    "auth_recovery",
+    "account_mismatch",
+    "unknown",
+    "failed",
+]
 
 
 def _validate_product_money(name: str, value: str | None, *, required: bool = False) -> None:
@@ -410,6 +426,9 @@ class AccountBrowserSessionPayload(BaseModel):
     browser_error: str | None = None
     vnc_available: bool = False
     cdp_available: bool = False
+    cookie_sync_status: AccountBrowserCookieSyncState = "pending"
+    browser_cookie_status: AccountBrowserCookieCheckState = "not_checked"
+    local_cookie_status: AccountBrowserCookieCheckState = "not_checked"
     fingerprint_snapshot: BrowserFingerprintSnapshotPayload | None = None
     fingerprint_detection_status: BrowserFingerprintDetectionStatus = "pending"
     fingerprint_detection_error: str | None = None
@@ -617,6 +636,7 @@ class AccountCreatePayload(BaseModel):
     cookie: str = Field(default="", max_length=10000)
     enabled: bool = True
     conversation_visible: bool = True
+    chat_enabled: bool = False
     order_management_visible: bool = True
     product_management_visible: bool = True
     proxy_id: str | None = Field(default=None, max_length=64)
@@ -689,6 +709,7 @@ class AccountUpdatePayload(BaseModel):
 
 class AccountWorkspaceVisibilityUpdatePayload(BaseModel):
     conversation_visible: bool | None = None
+    chat_enabled: bool | None = None
     order_management_visible: bool | None = None
     product_management_visible: bool | None = None
 
@@ -853,7 +874,7 @@ class ConversationAccountSyncPayload(BaseModel):
 
 class MessageAttachmentPayload(BaseModel):
     attachment_id: str
-    attachment_type: Literal["image"] = "image"
+    attachment_type: Literal["image", "audio"] = "image"
     remote_url: str | None = None
     mime_type: str | None = None
     width: int | None = None
@@ -930,12 +951,14 @@ class MessagePagePayload(BaseModel):
 class SendTextPayload(BaseModel):
     receiver_user_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=4000)
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=64)
 
-    @field_validator("receiver_user_id", "text", mode="before")
+    @field_validator("receiver_user_id", "text", "client_request_id", mode="before")
     @classmethod
     def normalize_string(cls, value: object) -> object:
         if isinstance(value, str):
-            return value.strip()
+            value = value.strip()
+            return value or None
         return value
 
 
@@ -946,6 +969,7 @@ class SendTextResultPayload(BaseModel):
     message_id: str | None = None
     error: str | None = None
     message: MessagePayload | None = None
+    client_request_id: str | None = None
 
 
 class SendImageResultPayload(SendTextResultPayload):
@@ -2081,6 +2105,82 @@ class BackgroundTaskCreatePayload(BaseModel):
         return value
 
 
+class ChatwootConfigPayload(BaseModel):
+    config_id: str = "default"
+    enabled: bool = False
+    base_url: str
+    inbox_identifier: str
+    chatwoot_inbox_id: int | None = None
+    webhook_secret: str
+    client_hmac_token: str | None = None
+    api_access_token: str | None = None
+    chatwoot_account_id: int | None = None
+    has_webhook_secret: bool = False
+    has_client_hmac_token: bool = False
+    has_api_access_token: bool = False
+    full_outbound_sync_enabled: bool = False
+    account_grouping_enabled: bool = False
+    managed_inbox_count: int = 0
+    callback_path: str
+    callback_url: str
+    status: str = "disabled"
+    last_error: str | None = None
+    last_webhook_at: datetime | None = None
+    last_push_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatwootConfigUpdatePayload(BaseModel):
+    enabled: bool = False
+    base_url: str = Field(min_length=8, max_length=1000)
+    inbox_identifier: str = Field(min_length=8, max_length=160)
+    callback_url: str | None = Field(default=None, min_length=8, max_length=1000)
+    webhook_secret: str | None = Field(default=None, min_length=12, max_length=500)
+    client_hmac_token: str | None = Field(default=None, min_length=12, max_length=1000)
+    clear_client_hmac_token: bool = False
+    chatwoot_account_id: int | None = Field(default=None, ge=1)
+    api_access_token: str | None = Field(default=None, min_length=12, max_length=1000)
+    clear_api_access_token: bool = False
+
+    @field_validator(
+        "base_url",
+        "inbox_identifier",
+        "callback_url",
+        "webhook_secret",
+        "client_hmac_token",
+        "api_access_token",
+        mode="before",
+    )
+    @classmethod
+    def normalize_chatwoot_string(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @model_validator(mode="after")
+    def validate_chatwoot_url(self) -> "ChatwootConfigUpdatePayload":
+        if not self.base_url.startswith(("http://", "https://")):
+            raise ValueError("Chatwoot 地址必须以 http:// 或 https:// 开头")
+        if self.callback_url and not self.callback_url.startswith(("http://", "https://")):
+            raise ValueError("Webhook 地址必须以 http:// 或 https:// 开头")
+        self.base_url = self.base_url.rstrip("/")
+        return self
+
+
+class ChatwootTestResultPayload(BaseModel):
+    success: bool
+    message: str
+    status_code: int | None = None
+
+
+class ChatwootWebhookAcceptedPayload(BaseModel):
+    accepted: bool = True
+    duplicate: bool = False
+    delivery_id: str
+
+
 class OrderSyncSettingPayload(BaseModel):
     account_id: str
     scope: OrderSyncScope = "sold"
@@ -2339,6 +2439,7 @@ class AccountPayload(BaseModel):
     sort_order: int = 0
     enabled: bool
     conversation_visible: bool = True
+    chat_enabled: bool = False
     order_management_visible: bool = True
     product_management_visible: bool = True
     notification_enabled: bool = True

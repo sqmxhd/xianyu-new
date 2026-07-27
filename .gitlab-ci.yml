@@ -1,0 +1,32 @@
+stages:
+  - test
+  - binary
+  - docker
+
+include:
+  - local: .gitlab/ci/common.yml
+  - local: .gitlab/ci/test.yml
+  - local: .gitlab/ci/binary.yml
+  - local: .gitlab/ci/docker.yml
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  PACKAGE_NAME: "xianyu-admin"
+  PYTHON_IMAGE_TAG: "3.13-slim-bookworm"
+  NODE_IMAGE_TAG: "20.19.2-bookworm-slim"
+  BUILDKIT_IMAGE_TAG: "v0.24.0-rootless"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  npm_config_cache: "$CI_PROJECT_DIR/.cache/npm"
+
+default:
+  interruptible: true
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure

@@ -1,0 +1,53 @@
+backend:
+  stage: test
+  image: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:${PYTHON_IMAGE_TAG}"
+  tags:
+    - docker
+  cache:
+    key:
+      files:
+        - apps/api/requirements.txt
+        - integrations/xianyu_core/requirements.txt
+    paths:
+      - .cache/pip/
+    policy: pull-push
+  before_script:
+    - !reference [.debian-trust, before_script]
+    - python -m venv .ci-venv
+    - .ci-venv/bin/python -m pip install --upgrade pip
+    - .ci-venv/bin/python -m pip install -r apps/api/requirements.txt -r integrations/xianyu_core/requirements.txt
+  script:
+    - XIANYU_DATABASE_URL=sqlite:///:memory: XIANYU_REDIS_URL=redis://127.0.0.1:6379/15 XIANYU_JWT_SECRET=test-secret-with-sufficient-length .ci-venv/bin/python -m unittest discover -s tests -v
+
+frontend:
+  stage: test
+  image: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:${NODE_IMAGE_TAG}"
+  tags:
+    - docker
+  cache:
+    key:
+      files:
+        - apps/admin/package-lock.json
+    paths:
+      - .cache/npm/
+    policy: pull-push
+  before_script:
+    - !reference [.debian-trust, before_script]
+  script:
+    - npm --prefix apps/admin ci
+    - npm --prefix apps/admin run build
+  artifacts:
+    name: "${PACKAGE_NAME}-${CI_COMMIT_SHORT_SHA}-frontend"
+    expire_in: 14 days
+    paths:
+      - apps/admin/dist/
+
+portability:
+  stage: test
+  image: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:${PYTHON_IMAGE_TAG}"
+  tags:
+    - docker
+  before_script:
+    - !reference [.debian-trust, before_script]
+  script:
+    - python tools/package/check_portability.py

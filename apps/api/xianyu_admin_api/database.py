@@ -155,6 +155,8 @@ def init_database() -> None:
 def _initialize_schema() -> None:
     Base.metadata.create_all(bind=engine)
     added_columns = _apply_lightweight_migrations(engine)
+    _migrate_chatwoot_platform_config(engine)
+    _ensure_chatwoot_platform_indexes(engine)
     _backfill_account_remarks(
         engine,
         column_added=("xianyu_accounts", "remark") in added_columns,
@@ -190,6 +192,129 @@ def _initialize_schema() -> None:
     _normalize_order_trade_roles(engine)
     _normalize_order_sync_metadata(engine)
     _backfill_headinfo_order_metadata(engine)
+
+
+def _migrate_chatwoot_platform_config(target_engine: Engine) -> None:
+    """Collapse the former account bindings into one platform configuration."""
+
+    tables = set(inspect(target_engine).get_table_names())
+    required = {
+        "xianyu_accounts",
+        "xianyu_chatwoot_config",
+        "xianyu_chatwoot_bindings",
+    }
+    if not required.issubset(tables):
+        return
+
+    old_columns = {
+        column["name"]
+        for column in inspect(target_engine).get_columns("xianyu_chatwoot_bindings")
+    }
+    client_hmac_expression = (
+        "client_hmac_token_encrypted"
+        if "client_hmac_token_encrypted" in old_columns
+        else "NULL"
+    )
+    with target_engine.begin() as connection:
+        selected = connection.execute(
+            text(
+                "SELECT binding_id FROM xianyu_chatwoot_bindings "
+                "ORDER BY enabled DESC, updated_at DESC, created_at DESC LIMIT 1"
+            )
+        ).scalar()
+        binding_count = int(
+            connection.execute(
+                text("SELECT COUNT(*) FROM xianyu_chatwoot_bindings")
+            ).scalar()
+            or 0
+        )
+        config_exists = connection.execute(
+            text(
+                "SELECT config_id FROM xianyu_chatwoot_config "
+                "WHERE config_id = 'default'"
+            )
+        ).scalar()
+        if selected and not config_exists:
+            connection.execute(
+                text(
+                    "INSERT INTO xianyu_chatwoot_config "
+                    "(config_id, enabled, base_url, inbox_identifier, "
+                    "chatwoot_account_id, webhook_secret_encrypted, "
+                    "client_hmac_token_encrypted, api_access_token_encrypted, "
+                    "status, last_error, last_webhook_at, last_push_at, "
+                    "created_at, updated_at) "
+                    "SELECT 'default', enabled, base_url, inbox_identifier, "
+                    "chatwoot_account_id, webhook_secret_encrypted, "
+                    f"{client_hmac_expression}, api_access_token_encrypted, "
+                    "status, last_error, last_webhook_at, last_push_at, "
+                    "created_at, updated_at FROM xianyu_chatwoot_bindings "
+                    "WHERE binding_id = :binding_id"
+                ),
+                {"binding_id": selected},
+            )
+        connection.execute(
+            text(
+                "UPDATE xianyu_accounts SET chat_enabled = :enabled "
+                "WHERE account_id IN ("
+                "SELECT account_id FROM xianyu_chatwoot_bindings WHERE enabled = :enabled"
+                ")"
+            ),
+            {"enabled": True},
+        )
+        if binding_count > 1:
+            for table_name in (
+                "xianyu_chatwoot_messages",
+                "xianyu_chatwoot_conversations",
+                "xianyu_chatwoot_contacts",
+            ):
+                if table_name in tables:
+                    connection.execute(text(f"DELETE FROM {table_name}"))
+        if "xianyu_chatwoot_webhook_deliveries" in tables:
+            connection.execute(text("DROP TABLE xianyu_chatwoot_webhook_deliveries"))
+        connection.execute(text("DROP TABLE xianyu_chatwoot_bindings"))
+
+
+def _ensure_chatwoot_platform_indexes(target_engine: Engine) -> None:
+    table_name = "xianyu_chatwoot_conversations"
+    if (
+        target_engine.dialect.name != "mysql"
+        or table_name not in inspect(target_engine).get_table_names()
+    ):
+        return
+    constraint_name = "uq_xianyu_chatwoot_conversation_remote"
+    constraints = {
+        item["name"]: item
+        for item in inspect(target_engine).get_unique_constraints(table_name)
+        if item.get("name")
+    }
+    existing = constraints.get(constraint_name)
+    if existing and existing.get("column_names") == ["chatwoot_conversation_id"]:
+        return
+    with target_engine.begin() as connection:
+        duplicate = connection.execute(
+            text(
+                "SELECT chatwoot_conversation_id FROM xianyu_chatwoot_conversations "
+                "GROUP BY chatwoot_conversation_id HAVING COUNT(*) > 1 LIMIT 1"
+            )
+        ).scalar()
+        if duplicate:
+            connection.execute(text("DELETE FROM xianyu_chatwoot_messages"))
+            connection.execute(text("DELETE FROM xianyu_chatwoot_conversations"))
+            connection.execute(text("DELETE FROM xianyu_chatwoot_contacts"))
+        if existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE xianyu_chatwoot_conversations "
+                    "DROP INDEX uq_xianyu_chatwoot_conversation_remote"
+                )
+            )
+        connection.execute(
+            text(
+                "ALTER TABLE xianyu_chatwoot_conversations "
+                "ADD UNIQUE INDEX uq_xianyu_chatwoot_conversation_remote "
+                "(chatwoot_conversation_id)"
+            )
+        )
 
 
 def _apply_lightweight_migrations(target_engine: Engine) -> set[tuple[str, str]]:
@@ -1370,7 +1495,7 @@ def _normalize_migrated_defaults(target_engine: Engine) -> None:
                         "last_outbound_at = CASE WHEN last_message_direction = 'outbound' "
                         "THEN last_message_at ELSE last_outbound_at END, "
                         "needs_reply = CASE WHEN last_message_direction = 'inbound' "
-                        "AND last_message_type IN ('text', 'image', 'unknown') THEN 1 ELSE 0 END "
+                        "AND last_message_type IN ('text', 'image', 'audio', 'unknown') THEN 1 ELSE 0 END "
                         "WHERE last_inbound_at IS NULL AND last_outbound_at IS NULL"
                     )
                 )

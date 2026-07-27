@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .platform_runtime import iter_process_arguments
 from .settings import settings
 
 
@@ -249,17 +250,9 @@ class BrowserProfileStorage:
             return []
         profile_text = str(directory.resolve())
         matches: list[int] = []
-        for process_dir in Path("/proc").glob("[0-9]*"):
-            try:
-                arguments = [
-                    item.decode("utf-8", "ignore")
-                    for item in (process_dir / "cmdline").read_bytes().split(b"\0")
-                    if item
-                ]
-            except (OSError, PermissionError):
-                continue
+        for process_id, arguments in iter_process_arguments():
             if profile_text in arguments or f"--user-data-dir={profile_text}" in arguments:
-                matches.append(int(process_dir.name))
+                matches.append(process_id)
         return matches
 
     @staticmethod

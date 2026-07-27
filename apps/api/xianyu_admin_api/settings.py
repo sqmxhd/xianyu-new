@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+
+from apps.runtime_paths import resource_path, runtime_path
 
 
 try:
@@ -47,6 +48,10 @@ class Settings:
     internal_api_url: str = os.getenv(
         "XIANYU_INTERNAL_API_URL", "http://127.0.0.1:8000"
     ).rstrip("/")
+    public_base_url: str = os.getenv("XIANYU_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    chatwoot_ca_bundle: str = os.getenv(
+        "XIANYU_CHATWOOT_CA_BUNDLE", ""
+    ).strip()
     cors_origins: tuple[str, ...] = tuple(
         item.strip()
         for item in os.getenv(
@@ -67,6 +72,14 @@ class Settings:
     cookie_keepalive_interval_seconds: int = int(
         os.getenv("XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS", "600")
     )
+    cookie_keepalive_recheck_min_seconds: float = max(
+        0.0,
+        float(os.getenv("XIANYU_COOKIE_KEEPALIVE_RECHECK_MIN_SECONDS", "15")),
+    )
+    cookie_keepalive_recheck_max_seconds: float = max(
+        cookie_keepalive_recheck_min_seconds,
+        float(os.getenv("XIANYU_COOKIE_KEEPALIVE_RECHECK_MAX_SECONDS", "30")),
+    )
     cookie_renewal_scan_seconds: int = int(
         os.getenv("XIANYU_COOKIE_RENEWAL_SCAN_SECONDS", "60")
     )
@@ -75,6 +88,14 @@ class Settings:
     )
     conversation_sync_interval_seconds: int = int(
         os.getenv("XIANYU_CONVERSATION_SYNC_INTERVAL_SECONDS", "180")
+    )
+    chatwoot_reconcile_interval_seconds: int = max(
+        300,
+        int(os.getenv("XIANYU_CHATWOOT_RECONCILE_INTERVAL_SECONDS", "900")),
+    )
+    chatwoot_read_sync_interval_seconds: int = max(
+        10,
+        int(os.getenv("XIANYU_CHATWOOT_READ_SYNC_INTERVAL_SECONDS", "20")),
     )
     conversation_full_sync_max_pages: int = max(
         1, int(os.getenv("XIANYU_CONVERSATION_FULL_SYNC_MAX_PAGES", "50"))
@@ -161,15 +182,19 @@ class Settings:
     )
     ip2region_db_path: str = os.getenv(
         "XIANYU_IP2REGION_DB_PATH",
-        str(Path(__file__).resolve().parent / "data" / "ip2region_v4.xdb"),
+        str(
+            resource_path(
+                "apps", "api", "xianyu_admin_api", "data", "ip2region_v4.xdb"
+            )
+        ),
     )
     geoip_db_path: str = os.getenv(
         "XIANYU_GEOIP_DB_PATH",
-        str(Path(__file__).resolve().parent / "data" / "geoip.db"),
+        str(resource_path("apps", "api", "xianyu_admin_api", "data", "geoip.db")),
     )
     product_image_dir: str = os.getenv(
         "XIANYU_PRODUCT_IMAGE_DIR",
-        str(Path(__file__).resolve().parents[3] / "data" / "product-images"),
+        str(runtime_path("data", "product-images")),
     )
     im_verification_browser_enabled: bool = env_bool(
         "XIANYU_IM_VERIFICATION_BROWSER_ENABLED", True
@@ -179,11 +204,11 @@ class Settings:
     ).strip()
     fingerprint_browser_root: str = os.getenv(
         "XIANYU_FINGERPRINT_BROWSER_ROOT",
-        str(Path(__file__).resolve().parents[3] / "third_party" / "fingerprint-chromium"),
+        str(runtime_path("third_party", "fingerprint-chromium")),
     ).strip()
     standard_browser_root: str = os.getenv(
         "XIANYU_STANDARD_BROWSER_ROOT",
-        str(Path(__file__).resolve().parents[3] / "third_party" / "standard-chromium"),
+        str(runtime_path("third_party", "standard-chromium")),
     ).strip()
     fingerprint_browser_download_timeout_seconds: int = int(
         os.getenv("XIANYU_FINGERPRINT_BROWSER_DOWNLOAD_TIMEOUT_SECONDS", "600")
@@ -196,7 +221,7 @@ class Settings:
     )
     im_verification_profile_dir: str = os.getenv(
         "XIANYU_IM_VERIFICATION_PROFILE_DIR",
-        str(Path(__file__).resolve().parents[3] / "data" / "browser-profiles"),
+        str(runtime_path("data", "browser-profiles")),
     )
     im_verification_display: str = os.getenv(
         "XIANYU_IM_VERIFICATION_DISPLAY", ":99"

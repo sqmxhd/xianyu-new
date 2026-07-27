@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Literal
 
+from apps.runtime_paths import resource_path
 from fastapi import (
     FastAPI,
     File,
@@ -25,7 +28,9 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .notifications import BarkNotifier
 from integrations.xianyu_core.images import (
@@ -34,13 +39,29 @@ from integrations.xianyu_core.images import (
 )
 from integrations.xianyu_core import OrderActionError, ProductPublishError
 from .cookie_renewal_manager import CookieRenewalCooldownError, CookieRenewalManager
-from .executors import run_media_blocking, run_qr_blocking, shutdown_executors
-from .executors import run_browser_blocking
+from .executors import (
+    run_browser_blocking,
+    run_external_blocking,
+    run_media_blocking,
+    run_qr_blocking,
+    shutdown_executors,
+)
 from .browser_binaries import (
     BrowserBinaryError,
     browser_binary_manager,
     browser_runtime_payload,
     standard_browser_binary_manager,
+)
+from .chatwoot import (
+    ChatwootIntegrationError,
+    ChatwootRepository,
+    _download_xianyu_audio,
+    _extract_xianyu_audio_url,
+    accept_chatwoot_webhook,
+    enqueue_account_metadata_sync,
+    enqueue_account_status_sync,
+    reconcile_chatwoot_read_states,
+    test_chatwoot_config,
 )
 from .queue import enqueue_background_task
 from .process_health import event_loop_monitor
@@ -93,6 +114,10 @@ from .schemas import (
     StandardBrowserActivatePayload,
     ConversationPayload,
     ConversationPagePayload,
+    ChatwootConfigPayload,
+    ChatwootConfigUpdatePayload,
+    ChatwootTestResultPayload,
+    ChatwootWebhookAcceptedPayload,
     CookieRenewalStatusPayload,
     DeliveryAutomationSettingPayload,
     DeliveryAutomationSettingUpdatePayload,
@@ -212,10 +237,15 @@ from .im_verification import (
 
 
 store = AccountStore()
+chatwoot_repository = ChatwootRepository(store.session_factory)
 notifier = BarkNotifier(store)
 runtime_manager = AccountRuntimeManager(store, notifier)
-im_verification_manager = IMVerificationManager(store, runtime_manager)
 cookie_renewal_manager = CookieRenewalManager(store, runtime_manager)
+im_verification_manager = IMVerificationManager(
+    store,
+    runtime_manager,
+    cookie_renewal_manager,
+)
 runtime_manager.set_cookie_auth_failure_handler(
     lambda account_id, source, message: cookie_renewal_manager.handle_auth_expired(
         account_id,
@@ -230,6 +260,8 @@ qr_initialize_tasks: dict[str, asyncio.Task[None]] = {}
 qr_session_keys: dict[str, str] = {}
 qr_start_lock = asyncio.Lock()
 qr_cleanup_task: asyncio.Task[None] | None = None
+chatwoot_reconcile_task: asyncio.Task[None] | None = None
+chatwoot_read_sync_task: asyncio.Task[None] | None = None
 realtime_tickets: dict[str, tuple[str, float]] = {}
 realtime_ticket_lock = asyncio.Lock()
 publish_enqueue_locks: dict[str, asyncio.Lock] = {}
@@ -334,6 +366,58 @@ async def _cleanup_qr_sessions_loop() -> None:
                 _discard_qr_session(session_id)
 
 
+async def _enqueue_chatwoot_reconciliation(reason: str) -> None:
+    config = await chatwoot_repository.get_config()
+    if config is None or not config["platform_enabled"]:
+        return
+    for account in await store.list_accounts():
+        if not account.enabled or not account.chat_enabled:
+            continue
+        await enqueue_account_metadata_sync(
+            store,
+            account_id=account.account_id,
+            reason=reason,
+        )
+        if account.runtime is not None:
+            await enqueue_account_status_sync(
+                store,
+                account_id=account.account_id,
+                state=account.runtime.state,
+                message=account.runtime.message,
+            )
+
+
+async def _chatwoot_reconcile_loop() -> None:
+    while True:
+        await asyncio.sleep(settings.chatwoot_reconcile_interval_seconds)
+        try:
+            await _enqueue_chatwoot_reconciliation("periodic-reconcile")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic Chatwoot reconciliation failed")
+
+
+async def _chatwoot_read_sync_loop() -> None:
+    while True:
+        try:
+            result = await reconcile_chatwoot_read_states(store)
+            for event in result.get("events", []):
+                await realtime_broker.publish(event)
+            errors = result.get("errors", [])
+            if errors:
+                logger.warning(
+                    "Chatwoot read reconciliation completed with %s error(s): %s",
+                    len(errors),
+                    "; ".join(str(error) for error in errors[:3]),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic Chatwoot read reconciliation failed")
+        await asyncio.sleep(settings.chatwoot_read_sync_interval_seconds)
+
+
 async def _run_startup_maintenance() -> None:
     try:
         await runtime_manager.restore_enabled_accounts()
@@ -342,6 +426,7 @@ async def _run_startup_maintenance() -> None:
         await store.backfill_peer_names()
         await store.backfill_message_contexts()
         await store.backfill_orders()
+        await _enqueue_chatwoot_reconciliation("startup-reconcile")
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -419,7 +504,7 @@ async def _persist_qr_login_credentials(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global qr_cleanup_task
+    global chatwoot_read_sync_task, chatwoot_reconcile_task, qr_cleanup_task
     await event_loop_monitor.start()
     await cookie_renewal_manager.start()
     await product_management_scheduler.start()
@@ -433,6 +518,14 @@ async def lifespan(_: FastAPI):
         _cleanup_qr_sessions_loop(),
         name="xianyu-qr-session-cleanup",
     )
+    chatwoot_reconcile_task = asyncio.create_task(
+        _chatwoot_reconcile_loop(),
+        name="xianyu-chatwoot-reconcile",
+    )
+    chatwoot_read_sync_task = asyncio.create_task(
+        _chatwoot_read_sync_loop(),
+        name="xianyu-chatwoot-read-sync",
+    )
     realtime_relay_task = asyncio.create_task(
         relay_cross_process_events(),
         name="xianyu-cross-process-realtime-relay",
@@ -444,6 +537,16 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(realtime_relay_task, return_exceptions=True)
         startup_task.cancel()
         await asyncio.gather(startup_task, return_exceptions=True)
+        if chatwoot_reconcile_task is not None:
+            chatwoot_reconcile_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await chatwoot_reconcile_task
+            chatwoot_reconcile_task = None
+        if chatwoot_read_sync_task is not None:
+            chatwoot_read_sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await chatwoot_read_sync_task
+            chatwoot_read_sync_task = None
         if qr_cleanup_task is not None:
             qr_cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -498,6 +601,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/notifications/bark",
     "/api/settings/ai-provider",
     "/api/settings/browser-runtime",
+    "/api/settings/message-services",
 )
 
 
@@ -710,7 +814,15 @@ def resolve_client_access(request: Request) -> ClientAccessPayload:
 @app.middleware("http")
 async def require_jwt(request: Request, call_next):  # type: ignore[no-untyped-def]
     user: UserPayload | None = None
-    if request.url.path.startswith("/api") and request.url.path not in AUTH_EXEMPT_PATHS:
+    is_chatwoot_webhook = (
+        request.method == "POST"
+        and request.url.path == "/api/integrations/chatwoot/webhook"
+    )
+    if (
+        request.url.path.startswith("/api")
+        and request.url.path not in AUTH_EXEMPT_PATHS
+        and not is_chatwoot_webhook
+    ):
         authorization = request.headers.get("authorization", "")
         bearer_token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else None
 
@@ -1778,6 +1890,11 @@ async def update_account(account_id: str, payload: AccountUpdatePayload) -> Acco
     await realtime_broker.publish(
         {"event": "account_upsert", "account_id": account_id, "data": result.model_dump(mode="json")}
     )
+    await enqueue_account_metadata_sync(
+        store,
+        account_id=account_id,
+        reason="account-updated",
+    )
     return result
 
 
@@ -1800,6 +1917,19 @@ async def update_account_workspace_visibility(
             "data": result.model_dump(mode="json"),
         }
     )
+    if payload.chat_enabled is True and record.runtime is not None:
+        await enqueue_account_status_sync(
+            store,
+            account_id=account_id,
+            state=record.runtime.state,
+            message=record.runtime.message,
+        )
+    if payload.chat_enabled is True:
+        await enqueue_account_metadata_sync(
+            store,
+            account_id=account_id,
+            reason="chat-enabled",
+        )
     return result
 
 
@@ -2317,6 +2447,85 @@ async def update_ai_provider_setting(
     payload: AIProviderSettingUpdatePayload,
 ) -> AIProviderSettingPayload:
     return await store.update_ai_provider_setting(payload)
+
+
+@app.get(
+    "/api/settings/message-services/chatwoot",
+    response_model=ChatwootConfigPayload,
+)
+async def get_chatwoot_config() -> ChatwootConfigPayload:
+    config = await chatwoot_repository.get_config_payload()
+    if config is None:
+        raise HTTPException(status_code=404, detail="Chatwoot config not found")
+    return config
+
+
+@app.put(
+    "/api/settings/message-services/chatwoot",
+    response_model=ChatwootConfigPayload,
+)
+async def update_chatwoot_config(
+    payload: ChatwootConfigUpdatePayload,
+) -> ChatwootConfigPayload:
+    try:
+        saved = await chatwoot_repository.upsert_config(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if saved.enabled:
+        for account in await store.list_accounts():
+            if not account.chat_enabled:
+                continue
+            await enqueue_account_metadata_sync(
+                store,
+                account_id=account.account_id,
+                reason="platform-config-saved",
+            )
+            if account.runtime is not None:
+                await enqueue_account_status_sync(
+                    store,
+                    account_id=account.account_id,
+                    state=account.runtime.state,
+                    message=account.runtime.message,
+                )
+    return saved
+
+
+@app.post(
+    "/api/settings/message-services/chatwoot/test",
+    response_model=ChatwootTestResultPayload,
+)
+async def test_saved_chatwoot_config() -> ChatwootTestResultPayload:
+    result = await test_chatwoot_config(chatwoot_repository)
+    if not result.success:
+        raise HTTPException(status_code=503, detail=result.message)
+    return result
+
+
+@app.post(
+    "/api/integrations/chatwoot/webhook",
+    response_model=ChatwootWebhookAcceptedPayload,
+    status_code=202,
+)
+async def receive_chatwoot_webhook(
+    request: Request,
+) -> ChatwootWebhookAcceptedPayload:
+    raw_body = await request.body()
+    try:
+        return await accept_chatwoot_webhook(
+            store,
+            chatwoot_repository,
+            raw_body=raw_body,
+            signature=(
+                request.headers.get("x-chatwoot-signature")
+                or request.headers.get("x-chatwoot-signature-256")
+            ),
+            timestamp=request.headers.get("x-chatwoot-timestamp"),
+            delivery_header=request.headers.get("x-chatwoot-delivery"),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ChatwootIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/me/auto-reply/rules", response_model=list[AutoReplyRulePayload])
@@ -2876,6 +3085,47 @@ async def list_conversation_messages(
         account_id=account_id,
         conversation_id=conversation_id,
         limit=limit,
+    )
+
+
+@app.get(
+    "/api/accounts/{account_id}/conversations/{conversation_id}"
+    "/messages/{message_pk}/audio"
+)
+async def get_message_audio(
+    account_id: str,
+    conversation_id: str,
+    message_pk: str,
+) -> Response:
+    message = await store.get_message(account_id, conversation_id, message_pk)
+    if message is None:
+        raise HTTPException(status_code=404, detail="message not found")
+    audio_url = next(
+        (
+            attachment.remote_url
+            for attachment in message.attachments
+            if attachment.attachment_type == "audio" and attachment.remote_url
+        ),
+        None,
+    )
+    if not audio_url:
+        audio_url = _extract_xianyu_audio_url(message.raw_payload)
+    if not audio_url:
+        raise HTTPException(status_code=404, detail="audio attachment not found")
+    try:
+        data, mime_type, filename = await run_external_blocking(
+            _download_xianyu_audio,
+            audio_url,
+        )
+    except ChatwootIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, max-age=300",
+        },
     )
 
 
@@ -4012,3 +4262,27 @@ async def set_conversation_platform_blacklist(
     if record is None:
         raise HTTPException(status_code=404, detail="account not found")
     return await runtime_manager.set_platform_blacklist(record, conversation_id, payload.blocked)
+
+
+class _AdminStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: dict) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith("api/"):
+                raise
+            return await super().get_response("index.html", scope)
+
+
+_configured_admin_dist = os.getenv("XIANYU_ADMIN_DIST_DIR", "").strip()
+_admin_dist = (
+    Path(_configured_admin_dist).expanduser().resolve()
+    if _configured_admin_dist
+    else resource_path("apps", "admin", "dist")
+)
+if (_admin_dist / "index.html").is_file():
+    app.mount(
+        "/",
+        _AdminStaticFiles(directory=str(_admin_dist), html=True),
+        name="admin",
+    )

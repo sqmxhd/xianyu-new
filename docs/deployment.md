@@ -91,9 +91,50 @@ systemctl status xianyu-worker
 npm run check:internal
 ```
 
+### Workspace/container service mode
+
+Do not use `npm run start:local` as a long-running deployment command. It is an
+interactive development command and keeps all child output attached to the
+calling terminal. If that terminal is no longer drained, application logging
+can eventually block the single API event loop.
+
+For the current `/workspaces/xianyu` container deployment, build the frontend
+and use the detached service manager instead:
+
+```bash
+npm run service:deploy
+npm run service:status
+```
+
+The manager runs API and queue worker in independent process groups, redirects
+their output to `data/logs`, rotates each log after 20 MiB, and runs an API
+liveness watchdog. Three consecutive `/api/health` failures restart only the
+API; a stopped worker is started independently. Runtime PID and health state
+are kept below `data/service-runtime`, which is ignored by Git.
+
+Operational commands:
+
+```bash
+npm run service:start
+npm run service:stop
+npm run service:restart
+npm run service:status
+```
+
+The default thresholds can be overridden without changing the repository:
+
+```text
+XIANYU_SERVICE_HEALTH_INTERVAL_SECONDS=10
+XIANYU_SERVICE_HEALTH_TIMEOUT_SECONDS=3
+XIANYU_SERVICE_HEALTH_FAILURES_BEFORE_RESTART=3
+XIANYU_SERVICE_API_START_GRACE_SECONDS=45
+XIANYU_SERVICE_LOG_MAX_BYTES=20971520
+XIANYU_SERVICE_LOG_KEEP_FILES=5
+```
+
 ## Nginx
 
-Use `deploy/nginx/xianyu-admin.conf` when serving the built Ant frontend on port `9000`.
+Use `deploy/nginx/xianyu-admin.conf` when serving the built Ant frontend directly.
 
 ```bash
 sudo cp deploy/nginx/xianyu-admin.conf /etc/nginx/conf.d/
@@ -104,8 +145,33 @@ sudo systemctl reload nginx
 Open:
 
 ```text
-http://内网机器IP:9000
+http://内网机器IP:9001
 ```
+
+### Internal HTTPS
+
+For the internal `192.168.2.3` deployment, install the certificate and key
+outside the repository under `/etc/xianyu/tls`, then install
+`deploy/nginx/xianyu-admin-https.conf`. The HTTPS proxy keeps the existing
+admin preview and API processes private behind one origin:
+
+```text
+https://192.168.2.3/
+https://192.168.2.3:6161/
+https://192.168.2.3/api/
+```
+
+Nginx serves the built frontend directly from
+`/workspaces/xianyu/apps/admin/dist` and terminates TLS on container ports `443`
+and `9000`; deployments that publish host port `6161` to container port `9000`
+can therefore use the HTTPS `:6161` URL. `vite preview` remains available for
+interactive development but is not required by this deployment.
+
+The certificate bundle must contain the leaf and intermediate certificate.
+Keep `privkey.pem` mode `0600`; never commit the deployment ZIP or extracted
+private key. When Nginx runs on the Docker host, publish the container's
+ports 8000 and 9001 on host loopback or update the upstreams to stable Docker
+service names.
 
 ## Auth bootstrap
 
@@ -116,6 +182,8 @@ Open the web login page. It shows the parsed visitor IP/source. If no admin user
 Minimum production checks:
 
 - systemd logs: `journalctl -u xianyu-api -f`, `journalctl -u xianyu-worker -f`
+- workspace/container logs: `data/logs/api.log`, `data/logs/worker.log`,
+  `data/logs/watchdog.log`
 - MySQL backup: dump `xianyu_admin`
 - product image backup: include the directory configured by `XIANYU_PRODUCT_IMAGE_DIR`
 - env backup: store `.env.local` securely outside git

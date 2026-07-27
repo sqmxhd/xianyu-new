@@ -12,12 +12,23 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import redis.asyncio as redis
 import requests
 from redis.exceptions import RedisError
 
 from .queue import TASK_QUEUE_NAME, resolve_broker_url
+from .chatwoot import (
+    CHATWOOT_ACCOUNT_METADATA_TASK,
+    CHATWOOT_ACCOUNT_STATUS_TASK,
+    CHATWOOT_LOCAL_MESSAGE_TASK,
+    CHATWOOT_WEBHOOK_TASK,
+    execute_account_metadata_task,
+    execute_account_status_task,
+    execute_local_message_task,
+    execute_webhook_task,
+)
 from .product_publish_service import execute_product_publish
 from .product_management_service import (
     ProductManagementRepository,
@@ -29,7 +40,7 @@ from .browser_profiles import browser_profile_storage
 from .executors import run_browser_blocking, run_external_blocking, run_media_blocking
 from .product_images import product_image_storage
 from .process_health import WORKER_HEARTBEAT_KEY
-from .realtime import close_cross_process_publisher
+from .realtime import close_cross_process_publisher, publish_cross_process
 from .schemas import BackgroundTaskCreatePayload, BackgroundTaskPayload, DeliverySendResultPayload
 from .security import create_access_token
 from .settings import settings
@@ -326,6 +337,95 @@ async def _notify_account_deletion_complete(
     )
 
 
+def _post_chatwoot_runtime_command(
+    action: str,
+    account_id: str,
+    payload: dict[str, Any],
+    access_token: str,
+) -> dict[str, Any]:
+    conversation_id = quote(str(payload.get("conversation_id") or ""), safe="")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    with requests.Session() as client:
+        client.trust_env = False
+        if action == "text":
+            url = (
+                f"{settings.internal_api_url}/api/accounts/{account_id}"
+                f"/conversations/{conversation_id}/send-text"
+            )
+            response = client.post(
+                url,
+                json={
+                    "receiver_user_id": payload.get("receiver_user_id"),
+                    "text": payload.get("text"),
+                    "client_request_id": payload.get("client_request_id"),
+                },
+                headers=headers,
+                timeout=30,
+            )
+        elif action == "image":
+            url = (
+                f"{settings.internal_api_url}/api/accounts/{account_id}"
+                f"/conversations/{conversation_id}/send-image"
+            )
+            response = client.post(
+                url,
+                data={"client_request_id": payload.get("client_request_id")},
+                files={
+                    "image": (
+                        payload.get("filename") or "chatwoot-image.jpg",
+                        payload.get("image_data") or b"",
+                        payload.get("mime_type") or "image/jpeg",
+                    )
+                },
+                headers=headers,
+                timeout=45,
+            )
+        elif action == "recall":
+            message_pk = quote(str(payload.get("message_pk") or ""), safe="")
+            url = (
+                f"{settings.internal_api_url}/api/accounts/{account_id}"
+                f"/conversations/{conversation_id}/messages/{message_pk}/recall"
+            )
+            response = client.post(url, headers=headers, timeout=30)
+        else:
+            raise ValueError(f"unsupported Chatwoot runtime command: {action}")
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if response.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else response.text[:300]
+        raise RuntimeError(
+            f"runtime owner rejected Chatwoot {action}: "
+            f"HTTP {response.status_code}: {detail}"
+        )
+    return body if isinstance(body, dict) else {}
+
+
+async def _chatwoot_runtime_command(
+    store: AccountStore,
+    action: str,
+    account_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    users = await store.list_users()
+    admin = next((user for user in users if user.enabled and user.role == "admin"), None)
+    if admin is None:
+        raise RuntimeError("no enabled admin is available for Chatwoot runtime command")
+    access_token, _ = create_access_token(
+        user_id=admin.user_id,
+        username=admin.username,
+        role=admin.role,
+    )
+    return await run_external_blocking(
+        _post_chatwoot_runtime_command,
+        action,
+        account_id,
+        payload,
+        access_token,
+    )
+
+
 async def execute_task(store: AccountStore, task: BackgroundTaskPayload) -> dict[str, Any]:
     """Execute one task.
 
@@ -339,6 +439,73 @@ async def execute_task(store: AccountStore, task: BackgroundTaskPayload) -> dict
             "task_type": task.task_type,
             "worker": "xianyu_admin_api.worker",
         }
+
+    if task.task_type == CHATWOOT_LOCAL_MESSAGE_TASK:
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        account_id = task.account_id or payload.get("account_id")
+        message_pk = payload.get("message_pk")
+        if not isinstance(account_id, str) or not isinstance(message_pk, str):
+            raise ValueError("chatwoot.sync_local_message requires account_id and message_pk")
+        return await execute_local_message_task(
+            store,
+            account_id=account_id,
+            message_pk=message_pk,
+        )
+
+    if task.task_type == CHATWOOT_WEBHOOK_TASK:
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        delivery_id = payload.get("delivery_id")
+        if not isinstance(delivery_id, str):
+            raise ValueError("chatwoot.process_webhook requires delivery_id")
+
+        async def runtime_command(
+            action: str,
+            account_id: str,
+            command_payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            return await _chatwoot_runtime_command(
+                store,
+                action,
+                account_id,
+                command_payload,
+            )
+
+        return await execute_webhook_task(
+            store,
+            delivery_id=delivery_id,
+            runtime_command=runtime_command,
+            read_notifier=publish_cross_process,
+        )
+
+    if task.task_type == CHATWOOT_ACCOUNT_STATUS_TASK:
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        account_id = task.account_id or payload.get("account_id")
+        state = payload.get("state")
+        if not isinstance(account_id, str) or not isinstance(state, str):
+            raise ValueError("chatwoot.sync_account_status requires account_id and state")
+        return await execute_account_status_task(
+            store,
+            account_id=account_id,
+            state=state,
+            message=payload.get("message") if isinstance(payload.get("message"), str) else None,
+        )
+
+    if task.task_type == CHATWOOT_ACCOUNT_METADATA_TASK:
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        account_id = task.account_id or payload.get("account_id")
+        if not isinstance(account_id, str):
+            raise ValueError(
+                "chatwoot.sync_account_metadata requires account_id"
+            )
+        return await execute_account_metadata_task(
+            store,
+            account_id=account_id,
+            reason=(
+                payload.get("reason")
+                if isinstance(payload.get("reason"), str)
+                else None
+            ),
+        )
 
     if task.task_type == "account.delete":
         payload = task.payload if isinstance(task.payload, dict) else {}
@@ -732,6 +899,29 @@ async def _execute_claimed_task(
             except Exception:
                 pass
         await finish(status="failed", error=str(exc))
+        if task.task_type in {
+            CHATWOOT_LOCAL_MESSAGE_TASK,
+            CHATWOOT_WEBHOOK_TASK,
+            CHATWOOT_ACCOUNT_STATUS_TASK,
+            CHATWOOT_ACCOUNT_METADATA_TASK,
+        }:
+            payload = dict(task.payload) if isinstance(task.payload, dict) else {}
+            retry_count = int(payload.get("_chatwoot_retry") or 0)
+            if retry_count < 3:
+                payload["_chatwoot_retry"] = retry_count + 1
+                delay_seconds = (5, 15, 45)[retry_count]
+                await store.create_background_task(
+                    BackgroundTaskCreatePayload(
+                        account_id=task.account_id,
+                        task_type=task.task_type,
+                        dedupe_key=(
+                            f"chatwoot-retry:{task.task_id}:{retry_count + 1}"
+                        ),
+                        run_after=datetime.now(UTC)
+                        + timedelta(seconds=delay_seconds),
+                        payload=payload,
+                    )
+                )
         return
 
     await finish(status="success", result=result)

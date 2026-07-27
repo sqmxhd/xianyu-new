@@ -46,9 +46,21 @@ class MessageType(StrEnum):
 
     TEXT = "text"
     IMAGE = "image"
+    AUDIO = "audio"
     CARD = "card"
     SYSTEM = "system"
     UNKNOWN = "unknown"
+
+
+@dataclass(slots=True, frozen=True)
+class ChatMediaAttachment:
+    """Normalized remote media attached to a chat event."""
+
+    attachment_type: str
+    remote_url: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    duration_seconds: int | None = None
 
 
 @dataclass(slots=True)
@@ -97,6 +109,7 @@ class ChatMessageEvent:
     raw_payload: Mapping[str, Any] = field(default_factory=dict)
     item_id: str | None = None
     created_at_ms: int | None = None
+    attachments: list[ChatMediaAttachment] = field(default_factory=list)
 
 
 @dataclass(slots=True)

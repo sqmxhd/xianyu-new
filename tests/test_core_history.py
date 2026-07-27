@@ -322,6 +322,81 @@ class CoreHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_type, MessageType.UNKNOWN)
         self.assertEqual(content, "[暂不支持的消息]")
 
+    def test_voice_push_is_normalized_with_audio_metadata(self) -> None:
+        session = self.make_session()
+        audio_url = (
+            "http://wantu-xm4-xianyu-video-hz.oss-cn-hangzhou.aliyuncs.com/"
+            "voice.amr"
+        )
+        payload = {
+            "1": {
+                "2": "conversation-audio@goofish",
+                "3": "message-audio",
+                "6": {
+                    "3": {
+                        "2": "[语音]",
+                        "5": json.dumps(
+                            {
+                                "contentType": 3,
+                                "audio": {
+                                    "duration": 2,
+                                    "sizeBytes": 4070,
+                                    "url": audio_url,
+                                },
+                            }
+                        ),
+                    }
+                },
+                "10": {
+                    "senderUserId": "buyer-audio@goofish",
+                    "reminderContent": "[语音]",
+                },
+            }
+        }
+
+        event = session._parse_push_payload(payload)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.message_type, MessageType.AUDIO)
+        self.assertEqual(event.content, "[语音 2秒]")
+        self.assertEqual(len(event.attachments), 1)
+        self.assertEqual(event.attachments[0].attachment_type, "audio")
+        self.assertEqual(event.attachments[0].remote_url, audio_url)
+        self.assertEqual(event.attachments[0].mime_type, "audio/amr")
+        self.assertEqual(event.attachments[0].size_bytes, 4070)
+        self.assertEqual(event.attachments[0].duration_seconds, 2)
+
+    def test_voice_history_is_normalized_with_audio_metadata(self) -> None:
+        session = self.make_session()
+        decoded = {
+            "contentType": 3,
+            "audio": {
+                "duration": 3,
+                "sizeBytes": 5000,
+                "url": "https://media.aliyuncs.com/voice.amr",
+            },
+        }
+        model = {
+            "message": {
+                "messageId": "history-audio",
+                "extension": {"senderUserId": "buyer-audio@goofish"},
+                "content": {
+                    "custom": {
+                        "data": base64.b64encode(
+                            json.dumps(decoded).encode()
+                        ).decode()
+                    }
+                },
+            }
+        }
+
+        event = session._parse_history_message(model, "conversation-audio")
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.message_type, MessageType.AUDIO)
+        self.assertEqual(event.content, "[语音 3秒]")
+        self.assertEqual(event.attachments[0].size_bytes, 5000)
+
     def test_base64_json_sync_entry_skips_binary_decryptor(self) -> None:
         session = self.make_session()
         payload = {

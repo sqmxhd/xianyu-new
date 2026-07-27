@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, patch
 from integrations.xianyu_core.identity import ClientIdentity
 
 from apps.api.xianyu_admin_api.browser_profiles import BrowserProfileStorage
+from apps.api.xianyu_admin_api.cookie_renewal import (
+    CookieRenewalError,
+    CookieRenewalResult,
+)
 from apps.api.xianyu_admin_api.im_verification import (
     IMVerificationBusyError,
     IMVerificationError,
@@ -70,6 +74,31 @@ class _FakeContext:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _CookieCoordinator:
+    def __init__(self, outcomes: dict[str, object]) -> None:
+        self.outcomes = outcomes
+        self.persist_calls: list[dict[str, object]] = []
+        self.auth_calls: list[dict[str, object]] = []
+        self.persist_results: list[bool] = []
+
+    async def validate_cookie(self, account: AccountRecord, cookie: str) -> object:
+        outcome = self.outcomes[cookie]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def persist_validated_cookie(
+        self,
+        account: AccountRecord,
+        **kwargs: object,
+    ) -> bool:
+        self.persist_calls.append({"account": account, **kwargs})
+        return self.persist_results.pop(0) if self.persist_results else True
+
+    async def handle_auth_expired(self, account_id: str, **kwargs: object) -> None:
+        self.auth_calls.append({"account_id": account_id, **kwargs})
 
 
 class _FakeCDPSession:
@@ -261,6 +290,212 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(context.closed)
             self.assertEqual(manager._account_actives, {})
             self.assertEqual(await manager.list_active_account_browsers(), [])
+
+    async def test_account_browser_cookie_reconcile_uses_four_way_decision(self) -> None:
+        browser_cookie = "unb=seller-1; _m_h5_tk=browser-token"
+        local_cookie = "unb=seller-1; _m_h5_tk=local-token"
+        active = _ActiveSession(
+            verification_id="account-browser:session-1",
+            purpose="account_browser",
+            account_id="account-1",
+            context=_FakeContext(),
+            page=_FakePage(),
+            bridge=None,
+            expires_at=time.time() + 60,
+            baseline_cookie=local_cookie,
+        )
+
+        cases = (
+            ("valid", "invalid", "updated_from_browser", "account_browser", False),
+            ("valid", "valid", "updated_from_browser", "account_browser", False),
+            ("invalid", "valid", "kept_local", "account_browser_local_validation", False),
+            ("invalid", "invalid", "auth_recovery", None, True),
+        )
+        for browser_state, local_state, expected_status, expected_source, auth_called in cases:
+            with self.subTest(browser=browser_state, local=local_state):
+                account = AccountRecord(
+                    account_id="account-1",
+                    account_name="seller",
+                    cookie=local_cookie,
+                )
+
+                def outcome(state: str, cookie: str) -> object:
+                    if state == "valid":
+                        return CookieRenewalResult(
+                            new_cookie=cookie,
+                            message="Cookie 轻量保活验证成功",
+                        )
+                    return CookieRenewalError(
+                        "闲鱼平台要求完成安全验证",
+                        kind="verification_required",
+                    )
+
+                coordinator = _CookieCoordinator(
+                    {
+                        browser_cookie: outcome(browser_state, browser_cookie),
+                        local_cookie: outcome(local_state, local_cookie),
+                    }
+                )
+                store = SimpleNamespace(get_account=AsyncMock(return_value=account))
+                manager = IMVerificationManager(
+                    store,
+                    SimpleNamespace(),
+                    coordinator,
+                )
+
+                result = await manager._reconcile_account_browser_cookie(
+                    active,
+                    browser_cookie,
+                )
+
+                self.assertEqual(result.sync_status, expected_status)
+                self.assertEqual(result.browser_status, browser_state)
+                self.assertEqual(result.local_status, local_state)
+                self.assertEqual(bool(coordinator.auth_calls), auth_called)
+                if expected_source is None:
+                    self.assertEqual(coordinator.persist_calls, [])
+                else:
+                    self.assertEqual(
+                        coordinator.persist_calls[0]["source"],
+                        expected_source,
+                    )
+
+    async def test_account_browser_cookie_reconcile_rejects_account_mismatch(self) -> None:
+        local_cookie = "unb=seller-1; _m_h5_tk=local-token"
+        browser_cookie = "unb=another-seller; _m_h5_tk=browser-token"
+        account = AccountRecord(
+            account_id="account-1",
+            account_name="seller",
+            cookie=local_cookie,
+        )
+        coordinator = _CookieCoordinator({})
+        manager = IMVerificationManager(
+            SimpleNamespace(get_account=AsyncMock(return_value=account)),
+            SimpleNamespace(),
+            coordinator,
+        )
+        active = _ActiveSession(
+            verification_id="account-browser:session-1",
+            purpose="account_browser",
+            account_id="account-1",
+            context=_FakeContext(),
+            page=_FakePage(),
+            bridge=None,
+            expires_at=time.time() + 60,
+            baseline_cookie=local_cookie,
+        )
+
+        result = await manager._reconcile_account_browser_cookie(
+            active,
+            browser_cookie,
+        )
+
+        self.assertEqual(result.sync_status, "account_mismatch")
+        self.assertEqual(coordinator.persist_calls, [])
+        self.assertEqual(coordinator.auth_calls, [])
+
+    async def test_account_browser_cookie_reconcile_keeps_unknown_out_of_auth_recovery(
+        self,
+    ) -> None:
+        browser_cookie = "unb=seller-1; _m_h5_tk=browser-token"
+        local_cookie = "unb=seller-1; _m_h5_tk=local-token"
+        account = AccountRecord(
+            account_id="account-1",
+            account_name="seller",
+            cookie=local_cookie,
+        )
+        coordinator = _CookieCoordinator(
+            {
+                browser_cookie: CookieRenewalError(
+                    "浏览器验证请求超时",
+                    kind="failed",
+                ),
+                local_cookie: CookieRenewalError(
+                    "本地验证请求超时",
+                    kind="failed",
+                ),
+            }
+        )
+        manager = IMVerificationManager(
+            SimpleNamespace(get_account=AsyncMock(return_value=account)),
+            SimpleNamespace(),
+            coordinator,
+        )
+        active = _ActiveSession(
+            verification_id="account-browser:session-1",
+            purpose="account_browser",
+            account_id="account-1",
+            context=_FakeContext(),
+            page=_FakePage(),
+            bridge=None,
+            expires_at=time.time() + 60,
+            baseline_cookie=local_cookie,
+        )
+
+        result = await manager._reconcile_account_browser_cookie(
+            active,
+            browser_cookie,
+        )
+
+        self.assertEqual(result.sync_status, "unknown")
+        self.assertEqual(result.browser_status, "unknown")
+        self.assertEqual(result.local_status, "unknown")
+        self.assertEqual(coordinator.persist_calls, [])
+        self.assertEqual(coordinator.auth_calls, [])
+
+    async def test_account_browser_cookie_reconcile_retries_atomic_update_once(self) -> None:
+        browser_cookie = "unb=seller-1; _m_h5_tk=browser-token"
+        local_cookie = "unb=seller-1; _m_h5_tk=local-token"
+        latest_cookie = "unb=seller-1; _m_h5_tk=concurrent-token"
+        account = AccountRecord(
+            account_id="account-1",
+            account_name="seller",
+            cookie=local_cookie,
+        )
+        latest = AccountRecord(
+            account_id="account-1",
+            account_name="seller",
+            cookie=latest_cookie,
+        )
+        coordinator = _CookieCoordinator(
+            {
+                browser_cookie: CookieRenewalResult(
+                    new_cookie=browser_cookie,
+                    message="Cookie 轻量保活验证成功",
+                ),
+                local_cookie: CookieRenewalResult(
+                    new_cookie=local_cookie,
+                    message="Cookie 轻量保活验证成功",
+                ),
+            }
+        )
+        coordinator.persist_results = [False, True]
+        store = SimpleNamespace(
+            get_account=AsyncMock(side_effect=[account, latest]),
+        )
+        manager = IMVerificationManager(store, SimpleNamespace(), coordinator)
+        active = _ActiveSession(
+            verification_id="account-browser:session-1",
+            purpose="account_browser",
+            account_id="account-1",
+            context=_FakeContext(),
+            page=_FakePage(),
+            bridge=None,
+            expires_at=time.time() + 60,
+            baseline_cookie=local_cookie,
+        )
+
+        result = await manager._reconcile_account_browser_cookie(
+            active,
+            browser_cookie,
+        )
+
+        self.assertEqual(result.sync_status, "updated_from_browser")
+        self.assertEqual(len(coordinator.persist_calls), 2)
+        self.assertEqual(
+            coordinator.persist_calls[1]["expected_cookie"],
+            latest_cookie,
+        )
 
     async def test_two_accounts_run_in_isolated_vnc_slots(self) -> None:
         accounts = [
@@ -847,6 +1082,68 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "Chromium HTTP 出口与账户代理出口不一致",
             mismatched.risk_findings,
+        )
+
+    async def test_browser_ipv6_without_proxy_ipv6_baseline_is_warning(self) -> None:
+        observed = {
+            "userAgent": "Mozilla/5.0 Chrome/148.0.0.0",
+            "webrtcCandidateTypes": [],
+            "webrtcCandidateAddresses": [],
+            "webrtcApiAvailable": True,
+            "webrtcBlocked": False,
+            "webrtcGatheringState": "complete",
+            "webrtcPrivateCandidateDetected": False,
+            "webrtcPublicCandidateDetected": False,
+            "navigatorWebdriver": False,
+            "automationWindowMarkers": [],
+            "cdpStackProbeDetected": False,
+        }
+
+        def response(address: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                status=200,
+                json=AsyncMock(return_value={"ip": address}),
+                text=AsyncMock(return_value=address),
+                dispose=AsyncMock(),
+            )
+
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value=observed),
+            request=SimpleNamespace(
+                get=AsyncMock(
+                    side_effect=[
+                        response("111.30.204.73"),
+                        response("2409:8a02:482a:7c10:a027:60c3:5705:8a99"),
+                    ]
+                )
+            ),
+        )
+        probe_settings = SimpleNamespace(
+            browser_fingerprint_probe_stun_url="",
+            proxy_ip_check_urls=(
+                "https://ipv4-probe.example.test/ip",
+                "https://ipv6-probe.example.test/ip",
+            ),
+        )
+
+        with patch("apps.api.xianyu_admin_api.im_verification.settings", probe_settings):
+            snapshot = await IMVerificationManager._capture_browser_fingerprint_snapshot(
+                page,
+                ClientIdentity(webrtc_policy="proxy_only"),
+                proxy_enabled=True,
+                expected_proxy_ips={"111.30.204.73"},
+            )
+
+        self.assertIsNotNone(snapshot)
+        self.assertIsNone(snapshot.browser_egress_match)
+        self.assertEqual(snapshot.risk_status, "warning")
+        self.assertIn(
+            "Chromium IPv6 出口缺少账户代理基线，需复核",
+            snapshot.risk_findings,
+        )
+        self.assertNotIn(
+            "Chromium HTTP 出口与账户代理出口不一致",
+            snapshot.risk_findings,
         )
 
     async def test_browser_probe_refreshes_stale_proxy_exit_baseline(self) -> None:

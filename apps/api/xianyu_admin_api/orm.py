@@ -144,6 +144,9 @@ class AccountORM(Base):
     conversation_visible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
+    chat_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     order_management_visible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
@@ -1795,6 +1798,211 @@ class ProductOperationItemORM(Base):
     )
 
     run: Mapped[ProductOperationRunORM] = relationship(back_populates="items")
+
+
+class ChatwootConfigORM(Base):
+    """Platform-wide Chatwoot API inbox configuration."""
+
+    __tablename__ = "xianyu_chatwoot_config"
+
+    config_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default="default", server_default="default"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    base_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    inbox_identifier: Mapped[str] = mapped_column(String(160), nullable=False)
+    chatwoot_inbox_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    callback_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    chatwoot_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    webhook_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    client_hmac_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="disabled", server_default="disabled"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_webhook_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_push_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ChatwootInboxBindingORM(Base):
+    """Automatically managed Chatwoot API inbox for one Xianyu account."""
+
+    __tablename__ = "xianyu_chatwoot_inbox_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "chatwoot_inbox_id",
+            name="uq_xianyu_chatwoot_inbox_binding_remote",
+        ),
+        UniqueConstraint(
+            "inbox_identifier",
+            name="uq_xianyu_chatwoot_inbox_binding_identifier",
+        ),
+        Index("ix_xianyu_chatwoot_inbox_binding_status", "status", "updated_at"),
+    )
+
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_accounts.account_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    config_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_chatwoot_config.config_id", ondelete="CASCADE"),
+        nullable=False,
+        default="default",
+        server_default="default",
+    )
+    chatwoot_inbox_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    inbox_identifier: Mapped[str] = mapped_column(String(160), nullable=False)
+    webhook_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    label_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    label_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ready", server_default="ready"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ChatwootContactORM(Base):
+    __tablename__ = "xianyu_chatwoot_contacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "peer_user_id",
+            name="uq_xianyu_chatwoot_contact_peer",
+        ),
+        UniqueConstraint(
+            "account_id",
+            "source_id",
+            name="uq_xianyu_chatwoot_contact_source",
+        ),
+    )
+
+    contact_map_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_accounts.account_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    peer_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    chatwoot_contact_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ChatwootConversationORM(Base):
+    __tablename__ = "xianyu_chatwoot_conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "conversation_id",
+            name="uq_xianyu_chatwoot_conversation_local",
+        ),
+        UniqueConstraint(
+            "chatwoot_conversation_id",
+            name="uq_xianyu_chatwoot_conversation_remote",
+        ),
+    )
+
+    conversation_map_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_accounts.account_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    peer_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    chatwoot_conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chatwoot_inbox_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inbox_identifier: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    chatwoot_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    remote_agent_last_seen_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), nullable=True
+    )
+    read_synced_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ChatwootMessageORM(Base):
+    __tablename__ = "xianyu_chatwoot_messages"
+    __table_args__ = (
+        Index(
+            "uq_xianyu_chatwoot_message_local",
+            "account_id",
+            "message_pk",
+            unique=True,
+        ),
+        Index(
+            "ix_xianyu_chatwoot_message_remote",
+            "account_id",
+            "chatwoot_message_id",
+        ),
+        Index("ix_xianyu_chatwoot_messages_state", "state", "updated_at"),
+    )
+
+    message_map_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_accounts.account_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message_pk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chatwoot_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    chatwoot_conversation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    origin: Mapped[str] = mapped_column(String(24), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ChatwootWebhookEventORM(Base):
+    __tablename__ = "xianyu_chatwoot_webhook_events"
+    __table_args__ = (
+        UniqueConstraint("delivery_id", name="uq_xianyu_chatwoot_webhook_event"),
+        Index("ix_xianyu_chatwoot_webhook_status", "status", "created_at"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    config_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_chatwoot_config.config_id", ondelete="CASCADE"),
+        nullable=False,
+        default="default",
+        server_default="default",
+    )
+    event_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    processed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class BackgroundTaskORM(Base):

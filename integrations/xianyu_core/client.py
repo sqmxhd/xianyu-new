@@ -31,6 +31,7 @@ from .images import ImageUploadError, PreparedImage, UploadedImage, prepare_imag
 from .message_content import parse_text_card_content
 from .models import (
     AccountConfig,
+    ChatMediaAttachment,
     ChatMessageEvent,
     ConnectionState,
     ConversationPage,
@@ -1850,12 +1851,20 @@ class XianyuAccountSession:
 
     def _classify_connection_error(self, exc: Exception) -> ConnectionState:
         message = str(exc).lower()
-        if any(marker in message for marker in ("cookie", "token", "auth", "unb", "access token")):
-            return ConnectionState.AUTH_EXPIRED
         if self.proxy_url and any(
             marker in message for marker in ("proxy", "socks", "tunnel", "connection refused")
         ):
             return ConnectionState.PROXY_FAILED
+        if isinstance(exc, AuthenticationExpiredError) or any(
+            marker in message
+            for marker in (
+                "fail_sys_session_expired",
+                "session过期",
+                "cookie is missing required field",
+                "different account",
+            )
+        ):
+            return ConnectionState.AUTH_EXPIRED
         return ConnectionState.OFFLINE if self._online_event.is_set() else ConnectionState.ERROR
 
     async def _send_ack(self, frame: dict[str, Any]) -> None:
@@ -1914,6 +1923,7 @@ class XianyuAccountSession:
                 raw_payload=payload,
                 item_id=self._extract_item_id(payload),
                 created_at_ms=self._extract_created_at_ms(message_node),
+                attachments=self._parse_push_attachments(message_node),
             )
 
         meta = payload.get("4")
@@ -2040,6 +2050,7 @@ class XianyuAccountSession:
             raw_payload=model,
             item_id=self._extract_item_id(model),
             created_at_ms=self._as_int(message.get("createAt") or message.get("time")),
+            attachments=self._parse_history_attachments(message),
         )
 
     def _parse_push_content(
@@ -2066,7 +2077,7 @@ class XianyuAccountSession:
                 return interpreted[0], fallback or interpreted[1]
         reminder = str(meta.get("reminderContent") or "")
         if reminder in {"[图片]", "[语音]"}:
-            return MessageType.IMAGE if reminder == "[图片]" else MessageType.UNKNOWN, reminder
+            return MessageType.IMAGE if reminder == "[图片]" else MessageType.AUDIO, reminder
         return (MessageType.TEXT if reminder else MessageType.UNKNOWN, reminder)
 
     def _parse_history_content(self, message: dict[str, Any]) -> tuple[MessageType, str]:
@@ -2102,6 +2113,15 @@ class XianyuAccountSession:
             urls.append(str(decoded["picUrl"]))
         if urls or decoded.get("contentType") == 2:
             return MessageType.IMAGE, "\n".join(dict.fromkeys(urls)) or "[图片]"
+        audio = decoded.get("audio")
+        if isinstance(audio, dict) or decoded.get("contentType") == 3:
+            duration = XianyuAccountSession._as_int(
+                audio.get("duration") if isinstance(audio, dict) else None
+            )
+            return (
+                MessageType.AUDIO,
+                f"[语音 {duration}秒]" if duration is not None else "[语音]",
+            )
         title = decoded.get("title") or decoded.get("template")
         if title:
             return MessageType.CARD, str(title)
@@ -2109,6 +2129,54 @@ class XianyuAccountSession:
         if summary:
             return MessageType.TEXT, str(summary)
         return MessageType.UNKNOWN, f"[未知消息类型:{decoded.get('contentType', '')}]"
+
+    @staticmethod
+    def _audio_attachment(
+        decoded: dict[str, Any] | None,
+    ) -> ChatMediaAttachment | None:
+        audio = decoded.get("audio") if isinstance(decoded, dict) else None
+        if not isinstance(audio, dict):
+            return None
+        url = str(audio.get("url") or "").strip()
+        if not url:
+            return None
+        return ChatMediaAttachment(
+            attachment_type="audio",
+            remote_url=url,
+            mime_type="audio/amr",
+            size_bytes=XianyuAccountSession._as_int(
+                audio.get("sizeBytes") or audio.get("size")
+            ),
+            duration_seconds=XianyuAccountSession._as_int(audio.get("duration")),
+        )
+
+    def _parse_push_attachments(
+        self,
+        message_node: dict[str, Any],
+    ) -> list[ChatMediaAttachment]:
+        message_content = message_node.get("6")
+        nested = message_content.get("3", {}) if isinstance(message_content, dict) else {}
+        if not isinstance(nested, dict):
+            return []
+        for key in ("5", "1"):
+            attachment = self._audio_attachment(
+                self._decode_json_value(nested.get(key))
+            )
+            if attachment is not None:
+                return [attachment]
+        return []
+
+    def _parse_history_attachments(
+        self,
+        message: dict[str, Any],
+    ) -> list[ChatMediaAttachment]:
+        content = message.get("content")
+        custom = content.get("custom", {}) if isinstance(content, dict) else {}
+        custom = custom if isinstance(custom, dict) else {}
+        attachment = self._audio_attachment(
+            self._decode_json_value(custom.get("data"))
+        )
+        return [attachment] if attachment is not None else []
 
     def _extract_sync_payloads(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
         body = frame.get("body")

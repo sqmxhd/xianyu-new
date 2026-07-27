@@ -70,10 +70,8 @@ class CookieRenewalService:
     def __init__(
         self,
         session_factory: Callable[[], requests.Session] = _TimeoutSession,
-        access_token_validator: Callable[[requests.Session, dict[str, str]], None] | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._access_token_validator = access_token_validator or self._validate_access_token
 
     def renew(
         self,
@@ -108,7 +106,8 @@ class CookieRenewalService:
             self._call_has_login(http, original, step_messages, passport_headers)
             self._call_silent_has_login(http, step_messages, passport_headers)
             self._call_set_login_settings(http, step_messages, passport_headers)
-            self._refresh_mtop_cookie(http, mtop_headers)
+            self._validate_web_mtop_cookie(http, mtop_headers)
+            step_messages.append("Web Cookie 交叉验证")
 
             renewed = session_cookie_map(http)
             if renewed.get("unb") != original_unb:
@@ -119,14 +118,6 @@ class CookieRenewalService:
             if not renewed.get("_m_h5_tk"):
                 raise CookieRenewalError(
                     "续期后缺少 _m_h5_tk，需要重新登录",
-                    kind="auth_expired",
-                )
-
-            self._access_token_validator(http, renewed)
-            renewed = session_cookie_map(http)
-            if renewed.get("unb") != original_unb:
-                raise CookieRenewalError(
-                    "访问令牌校验返回了不同账户，已拒绝覆盖原 Cookie",
                     kind="auth_expired",
                 )
 
@@ -168,8 +159,8 @@ class CookieRenewalService:
         token_cookie = original.get("_m_h5_tk", "")
         if not original_unb or not token_cookie:
             raise CookieRenewalError(
-                "Cookie 缺少平台验证字段，需要重新登录",
-                kind="auth_expired",
+                "Cookie 缺少 Web 平台验证字段，状态需要复核",
+                kind="suspected_expired",
             )
         client_identity = identity or DEFAULT_CLIENT_IDENTITY
         mtop_headers = self._mtop_headers(client_identity)
@@ -226,8 +217,8 @@ class CookieRenewalService:
                 upper = response_text.upper()
                 if "FAIL_SYS_SESSION_EXPIRED" in upper or "Session过期" in response_text:
                     raise CookieRenewalError(
-                        "闲鱼平台会话已过期，需要重新登录",
-                        kind="auth_expired",
+                        "闲鱼 Web 平台会话疑似过期",
+                        kind="suspected_expired",
                     )
                 if any(marker in upper for marker in ("VALIDATE", "RGV587", "CAPTCHA")):
                     raise CookieRenewalError(
@@ -360,51 +351,76 @@ class CookieRenewalService:
             messages.append("长期登录刷新")
 
     @staticmethod
-    def _refresh_mtop_cookie(
+    def _validate_web_mtop_cookie(
         http: requests.Session,
         mtop_headers: dict[str, str],
     ) -> None:
-        api = "mtop.idle.web.user.page.nav"
-        response = http.post(
-            MTOP_NAV_URL,
-            params={
-                "jsv": "2.7.2",
-                "appKey": "34839810",
-                "t": str(int(time.time() * 1000)),
-                "sign": "",
-                "v": "1.0",
-                "type": "originaljson",
-                "dataType": "json",
-                "timeout": "20000",
-                "api": api,
-                "sessionOption": "AutoLoginOnly",
-                "spm_cnt": "a21ybx.home.0.0",
-            },
-            data="data=%7B%7D",
-            headers=mtop_headers,
-        )
-        response.raise_for_status()
-        _flatten_response_cookies(http, response)
-
-    @staticmethod
-    def _validate_access_token(http: requests.Session, cookies: dict[str, str]) -> None:
         from integrations.xianyu_core.upstream import load_upstream_modules
 
         upstream = load_upstream_modules()
-        api = upstream.XianyuApis(cookies, upstream.generate_device_id(cookies["unb"]))
-        api.session.close()
-        api.session = http
-        token_response = api.get_token()
-        token = (
-            token_response.get("data", {}).get("accessToken")
-            if isinstance(token_response, dict)
-            else None
-        )
-        if not token:
-            raise CookieRenewalError(
-                "Cookie 无法获取闲鱼 access token，需要重新登录",
-                kind="auth_expired",
+        api = "mtop.idle.web.user.page.nav"
+        data_value = "{}"
+        for attempt in range(2):
+            cookies = session_cookie_map(http)
+            token_cookie = cookies.get("_m_h5_tk", "")
+            if not token_cookie:
+                raise CookieRenewalError(
+                    "Web Cookie 缺少 _m_h5_tk，需要重新登录",
+                    kind="auth_expired",
+                )
+            timestamp = str(int(time.time() * 1000))
+            response = http.post(
+                MTOP_NAV_URL,
+                params={
+                    "jsv": "2.7.2",
+                    "appKey": "34839810",
+                    "t": timestamp,
+                    "sign": upstream.generate_sign(
+                        timestamp,
+                        token_cookie.split("_", 1)[0],
+                        data_value,
+                    ),
+                    "v": "1.0",
+                    "type": "originaljson",
+                    "dataType": "json",
+                    "timeout": "20000",
+                    "api": api,
+                    "sessionOption": "AutoLoginOnly",
+                    "spm_cnt": "a21ybx.home.0.0",
+                },
+                data={"data": data_value},
+                headers=mtop_headers,
             )
+            response.raise_for_status()
+            _flatten_response_cookies(http, response)
+            payload = response.json()
+            ret = payload.get("ret") if isinstance(payload, dict) else None
+            entries = ret if isinstance(ret, list) else [ret] if ret else []
+            response_text = " ".join(str(entry) for entry in entries)
+            upper = response_text.upper()
+            if any("SUCCESS" in str(entry).upper() for entry in entries):
+                return
+            if (
+                "FAIL_SYS_SESSION_EXPIRED" in upper
+                or "Session过期" in response_text
+            ):
+                raise CookieRenewalError(
+                    "闲鱼 Web Cookie 已被独立 MTOP 接口确认过期",
+                    kind="auth_expired",
+                )
+            if any(marker in upper for marker in ("VALIDATE", "RGV587", "CAPTCHA")):
+                raise CookieRenewalError(
+                    "闲鱼 Web 平台要求完成安全验证",
+                    kind="verification_required",
+                )
+            token_expired = "TOKEN_EX" in upper or "TOKEN_EMPTY" in upper
+            if token_expired and attempt == 0:
+                continue
+            raise CookieRenewalError(
+                f"Web Cookie 交叉验证失败：{response_text[:200] or '平台返回异常'}",
+                kind="failed",
+            )
+        raise CookieRenewalError("Web Cookie 交叉验证未完成", kind="failed")
 
     @staticmethod
     def _passport_headers(identity: ClientIdentity) -> dict[str, str]:

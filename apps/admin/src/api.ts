@@ -27,6 +27,9 @@ import type {
   BarkConfig,
   BarkTestPayload,
   ChatMessage,
+  ChatwootConfig,
+  ChatwootConfigFormValues,
+  ChatwootTestResult,
   Conversation,
   ConversationPage,
   CookieRenewalStatus,
@@ -182,6 +185,25 @@ async function requestBlob(path: string): Promise<Blob> {
 
 export function listAccounts(): Promise<Account[]> {
   return request<Account[]>("/api/accounts");
+}
+
+export function getChatwootConfig(): Promise<ChatwootConfig> {
+  return request<ChatwootConfig>("/api/settings/message-services/chatwoot");
+}
+
+export function saveChatwootConfig(
+  values: ChatwootConfigFormValues
+): Promise<ChatwootConfig> {
+  return request<ChatwootConfig>("/api/settings/message-services/chatwoot", {
+    method: "PUT",
+    body: JSON.stringify(values)
+  });
+}
+
+export function testChatwootConfig(): Promise<ChatwootTestResult> {
+  return request<ChatwootTestResult>("/api/settings/message-services/chatwoot/test", {
+    method: "POST"
+  });
 }
 
 export function reorderAccounts(accountIds: string[]): Promise<Account[]> {
@@ -367,7 +389,10 @@ export function updateAccountWorkspaceVisibility(
   values: Partial<
     Pick<
       Account,
-      "conversation_visible" | "order_management_visible" | "product_management_visible"
+      | "conversation_visible"
+      | "chat_enabled"
+      | "order_management_visible"
+      | "product_management_visible"
     >
   >
 ): Promise<Account> {
@@ -1233,6 +1258,17 @@ export function cleanupProductUploadSession(accountId: string, uploadSessionId: 
 
 export function getProductImageContent(accountId: string, assetId: string): Promise<Blob> {
   return requestBlob(`/api/accounts/${accountId}/products/images/${assetId}/content`);
+}
+
+export function getMessageAudio(
+  accountId: string,
+  conversationId: string,
+  messagePk: string
+): Promise<Blob> {
+  return requestBlob(
+    `/api/accounts/${encodeURIComponent(accountId)}/conversations/` +
+      `${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messagePk)}/audio`
+  );
 }
 
 export function deleteProductImage(accountId: string, assetId: string): Promise<void> {

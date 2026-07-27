@@ -69,12 +69,8 @@ def check_api_health() -> CheckResult:
         ok = (
             response.status == 200
             and bool(body.get("ok"))
-            and bool(body.get("runtime_ok", True))
         )
-        detail = (
-            f"HTTP {response.status}; runtime "
-            f"{body.get('online_accounts', 0)}/{body.get('enabled_accounts', 0)} online"
-        )
+        detail = f"HTTP {response.status}; API event loop responsive"
         return CheckResult("api/health", ok, detail, _elapsed_ms(start))
     except URLError as exc:
         return CheckResult("api/health", False, exc.__class__.__name__, _elapsed_ms(start))
