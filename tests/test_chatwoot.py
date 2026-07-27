@@ -1642,13 +1642,17 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(items[0].viewer_unread_count, 0)
 
-    async def test_deleted_agent_message_does_not_call_platform_recall(self) -> None:
+    async def test_deleted_agent_message_calls_platform_recall_and_reports_result(
+        self,
+    ) -> None:
         await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
                 inbox_identifier="inbox-identifier",
                 webhook_secret="webhook-secret-value",
+                chatwoot_account_id=1,
+                api_access_token="service-token",
             )
         )
         await self.store.record_message(
@@ -1699,21 +1703,214 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             payload_sha256=hashlib.sha256(raw).hexdigest(),
             raw_payload=raw,
         )
+        runtime_command = AsyncMock(
+            return_value={
+                "success": True,
+                "message_pk": outbound.message_pk,
+            }
+        )
+
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot._create_private_delivery_note",
+            new=AsyncMock(return_value=True),
+        ) as create_private_note:
+            result = await execute_webhook_task(
+                self.store,
+                delivery_id="delivery-recall",
+                runtime_command=runtime_command,
+            )
+            await self.repository.record_webhook(
+                delivery_id="delivery-recall-duplicate",
+                event_name="message_updated",
+                payload_sha256=hashlib.sha256(raw).hexdigest(),
+                raw_payload=raw,
+            )
+            duplicate_result = await execute_webhook_task(
+                self.store,
+                delivery_id="delivery-recall-duplicate",
+                runtime_command=runtime_command,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["platform_recall"])
+        self.assertEqual(result["remote_deleted"], 1)
+        self.assertEqual(result["recalled_messages"], 1)
+        self.assertTrue(duplicate_result["ok"])
+        self.assertEqual(duplicate_result["recalled_messages"], 1)
+        runtime_command.assert_awaited_once_with(
+            "recall",
+            self.account.account_id,
+            {
+                "conversation_id": "conversation-1",
+                "message_pk": outbound.message_pk,
+            },
+        )
+        create_private_note.assert_awaited_once_with(
+            ANY,
+            chatwoot_conversation_id="88",
+            content="↩ 闲鱼消息已撤回（Chatwoot 原消息已删除）",
+        )
+        mappings = await self.repository.find_message_maps_by_remote(
+            self.account.account_id,
+            "99",
+        )
+        self.assertEqual(mappings[0]["state"], "recalled")
+
+    async def test_deleted_agent_message_reports_platform_recall_failure(
+        self,
+    ) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="http://chatwoot.internal:3000",
+                inbox_identifier="inbox-identifier",
+                webhook_secret="webhook-secret-value",
+                chatwoot_account_id=1,
+                api_access_token="service-token",
+            )
+        )
+        await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-delete-failed",
+            direction="inbound",
+            message_type="text",
+            content="hello",
+            peer_user_id="buyer-delete-failed",
+        )
+        outbound = await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-delete-failed",
+            direction="outbound",
+            message_type="text",
+            content="reply",
+            message_id="platform-delete-failed",
+            peer_user_id="buyer-delete-failed",
+            send_success=True,
+        )
+        assert outbound is not None
+        await self.repository.create_conversation_map(
+            account_id=self.account.account_id,
+            conversation_id="conversation-delete-failed",
+            peer_user_id="buyer-delete-failed",
+            source_id="source-delete-failed",
+            chatwoot_conversation_id="188",
+        )
+        await self.repository.record_message_map(
+            account_id=self.account.account_id,
+            message_pk=outbound.message_pk,
+            chatwoot_message_id="199",
+            chatwoot_conversation_id="188",
+            origin="chatwoot",
+            state="synced",
+        )
+        webhook_payload = {
+            "event": "message_updated",
+            "id": 199,
+            "message_type": "outgoing",
+            "content_attributes": {"deleted": True},
+            "conversation": {"id": 188},
+        }
+        raw = json.dumps(webhook_payload).encode()
+        await self.repository.record_webhook(
+            delivery_id="delivery-delete-failed",
+            event_name="message_updated",
+            payload_sha256=hashlib.sha256(raw).hexdigest(),
+            raw_payload=raw,
+        )
+        runtime_command = AsyncMock(
+            return_value={
+                "success": False,
+                "error": "消息已超过两分钟撤回时限",
+            }
+        )
+
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot._create_private_delivery_note",
+            new=AsyncMock(return_value=True),
+        ) as create_private_note:
+            result = await execute_webhook_task(
+                self.store,
+                delivery_id="delivery-delete-failed",
+                runtime_command=runtime_command,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["platform_recall"])
+        self.assertEqual(result["failed_messages"], 1)
+        create_private_note.assert_awaited_once()
+        self.assertIn(
+            "消息已超过两分钟撤回时限",
+            create_private_note.await_args.kwargs["content"],
+        )
+        mappings = await self.repository.find_message_maps_by_remote(
+            self.account.account_id,
+            "199",
+        )
+        self.assertEqual(mappings[0]["state"], "recall_failed")
+        self.assertEqual(mappings[0]["error"], "消息已超过两分钟撤回时限")
+
+    async def test_deleted_incoming_message_remains_chatwoot_only(self) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="http://chatwoot.internal:3000",
+                inbox_identifier="inbox-identifier",
+                webhook_secret="webhook-secret-value",
+            )
+        )
+        inbound = await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-incoming-delete",
+            direction="inbound",
+            message_type="text",
+            content="hello",
+            message_id="platform-incoming-delete",
+            peer_user_id="buyer-incoming-delete",
+        )
+        assert inbound is not None
+        await self.repository.create_conversation_map(
+            account_id=self.account.account_id,
+            conversation_id="conversation-incoming-delete",
+            peer_user_id="buyer-incoming-delete",
+            source_id="source-incoming-delete",
+            chatwoot_conversation_id="288",
+        )
+        await self.repository.record_message_map(
+            account_id=self.account.account_id,
+            message_pk=inbound.message_pk,
+            chatwoot_message_id="299",
+            chatwoot_conversation_id="288",
+            origin="xianyu",
+            state="synced",
+        )
+        webhook_payload = {
+            "event": "message_updated",
+            "id": 299,
+            "message_type": "incoming",
+            "content_attributes": {"deleted": True},
+            "conversation": {"id": 288},
+        }
+        raw = json.dumps(webhook_payload).encode()
+        await self.repository.record_webhook(
+            delivery_id="delivery-incoming-delete",
+            event_name="message_updated",
+            payload_sha256=hashlib.sha256(raw).hexdigest(),
+            raw_payload=raw,
+        )
         runtime_command = AsyncMock()
 
         result = await execute_webhook_task(
             self.store,
-            delivery_id="delivery-recall",
+            delivery_id="delivery-incoming-delete",
             runtime_command=runtime_command,
         )
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["platform_recall"])
-        self.assertEqual(result["remote_deleted"], 1)
         runtime_command.assert_not_awaited()
         mappings = await self.repository.find_message_maps_by_remote(
             self.account.account_id,
-            "99",
+            "299",
         )
         self.assertEqual(mappings[0]["state"], "remote_deleted")
 
