@@ -11,6 +11,26 @@ from tools.package.build import resolve_version
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_container_deployment_has_no_fixed_public_origin(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "compose.yml").read_text(encoding="utf-8")
+        bundled = (root / ".env.docker.example").read_text(encoding="utf-8")
+        external = (root / ".env.docker.external.example").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("https://192.168.2.3", compose)
+        self.assertNotIn("https://192.168.2.3", bundled)
+        self.assertNotIn("https://192.168.2.3", external)
+        self.assertIn('profiles:\n      - bundled', compose)
+        self.assertIn('required: false', compose)
+        self.assertIn(
+            '"${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"',
+            compose,
+        )
+        self.assertIn("COMPOSE_PROFILES=bundled", bundled)
+        self.assertIn("COMPOSE_PROFILES=", external)
+
     def test_source_runtime_and_resource_roots_are_stable(self) -> None:
         self.assertEqual(
             resource_path("apps", "admin", "package.json"),

@@ -6,8 +6,8 @@ x-application-environment: &application-environment
   XIANYU_JWT_SECRET: "${XIANYU_JWT_SECRET:?set XIANYU_JWT_SECRET in .env.docker}"
   XIANYU_INTERNAL_API_URL: "http://api:8000"
   XIANYU_API_HEALTH_URL: "http://api:8000/api/health"
-  XIANYU_PUBLIC_BASE_URL: "${XIANYU_PUBLIC_BASE_URL:-https://192.168.2.3:6161}"
-  XIANYU_CORS_ORIGINS: "${XIANYU_CORS_ORIGINS:-https://192.168.2.3:6161}"
+  XIANYU_PUBLIC_BASE_URL: "${XIANYU_PUBLIC_BASE_URL:-}"
+  XIANYU_CORS_ORIGINS: "${XIANYU_CORS_ORIGINS:-}"
   XIANYU_CHATWOOT_CA_BUNDLE: "/etc/xianyu/ca/internal-root.crt"
 
 x-application-volumes: &application-volumes
@@ -23,12 +23,16 @@ x-application-volumes: &application-volumes
 services:
   mysql:
     image: "${MYSQL_IMAGE:-mysql:8.4}"
+    profiles:
+      - bundled
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: xianyu_admin
       MYSQL_USER: xianyu
       MYSQL_PASSWORD: "${MYSQL_PASSWORD:-xianyu-change-me}"
-      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.docker}"
+      # Keep interpolation valid while this profiled service is disabled.
+      # The bundled environment template supplies the required real value.
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-}"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -41,6 +45,8 @@ services:
 
   redis:
     image: "${REDIS_IMAGE:-redis:7.4-alpine}"
+    profiles:
+      - bundled
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: "${REDIS_PASSWORD:-xianyu-change-me}"
@@ -78,8 +84,10 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
     healthcheck:
       test:
         - CMD
@@ -108,7 +116,7 @@ services:
       - gateway
     restart: unless-stopped
     ports:
-      - "${XIANYU_HTTPS_PORT:-6161}:8443"
+      - "${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"
     volumes:
       - type: bind
         source: "${XIANYU_TLS_DIR:?set XIANYU_TLS_DIR in .env.docker}"

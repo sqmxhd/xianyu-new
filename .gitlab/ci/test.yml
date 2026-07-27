@@ -3,6 +3,10 @@ backend:
   image: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:${PYTHON_IMAGE_TAG}"
   tags:
     - docker
+  variables:
+    XIANYU_DATABASE_URL: "sqlite:///:memory:"
+    XIANYU_REDIS_URL: "redis://127.0.0.1:6379/15"
+    XIANYU_JWT_SECRET: "test-secret-with-sufficient-length"
   cache:
     key:
       files:
@@ -17,7 +21,7 @@ backend:
     - .ci-venv/bin/python -m pip install --upgrade pip
     - .ci-venv/bin/python -m pip install -r apps/api/requirements.txt -r integrations/xianyu_core/requirements.txt
   script:
-    - XIANYU_DATABASE_URL=sqlite:///:memory: XIANYU_REDIS_URL=redis://127.0.0.1:6379/15 XIANYU_JWT_SECRET=test-secret-with-sufficient-length .ci-venv/bin/python -m unittest discover -s tests -v
+    - .ci-venv/bin/python -m unittest discover -s tests -v
 
 frontend:
   stage: test

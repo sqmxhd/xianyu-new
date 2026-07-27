@@ -98,6 +98,11 @@ Copy `.env.example` to `.env` next to the executable before starting the API or
 worker. Real environment files, cookies, browser profiles, TLS private keys,
 and downloaded browser binaries are not included in an artifact.
 
+The native archive does not embed a database or a Redis server. Start the API
+and worker as separate processes and point both processes at the same external
+MySQL and Redis services. SQLite remains useful for tests and diagnostics, but
+MySQL is the production database.
+
 ## Docker deployment
 
 The same application image is reused by three service containers:
@@ -106,17 +111,40 @@ The same application image is reused by three service containers:
 - `worker`: background queue tasks.
 - `gateway`: built frontend and HTTPS termination.
 
-MySQL and Redis remain separate containers. Copy and edit the Docker
-environment file, then start the stack:
+Database task rows are durable in MySQL. Redis carries task IDs to the worker
+and does not replace the database. Neither server runs as a child process in the
+application image.
+
+For a self-contained deployment, enable the `bundled` profile through the
+provided environment template. MySQL and Redis then run as separate containers:
 
 ```bash
 cp .env.docker.example .env.docker
-docker compose --env-file .env.docker up -d --build
+docker compose --env-file .env.docker --profile bundled up -d --build
+```
+
+To use externally managed MySQL and Redis, use the external template. Its empty
+`COMPOSE_PROFILES` value leaves the bundled infrastructure disabled:
+
+```bash
+cp .env.docker.external.example .env.docker
+docker compose --env-file .env.docker up -d
 ```
 
 The deployment exposes only the HTTPS gateway. The default host port is `6161`.
+`XIANYU_BIND_IP` defaults to `0.0.0.0`, so the gateway accepts traffic on every
+IPv4 interface. Change it when a deployment must be restricted to one host
+address. MySQL, Redis, and the API are not published to the host.
+
+No public application address is compiled into the image. Same-origin access
+does not require a CORS entry. Configure `XIANYU_CORS_ORIGINS` only for
+separately hosted frontends. Configure `XIANYU_PUBLIC_BASE_URL` with the actual
+externally reachable HTTPS origin when Chatwoot or another webhook consumer
+needs an absolute callback URL.
+
 TLS certificates and the internal root CA are bind-mounted at runtime and are
-never copied into the image.
+never copied into the image. The mounted certificate must cover the IP address
+or DNS name used by clients.
 
 Persistent named volumes contain database data, Redis data, product images,
 browser profiles, and managed browser downloads.

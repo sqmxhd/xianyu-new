@@ -51,12 +51,24 @@ Docker HTTPS 部署：
 
 ```bash
 cp .env.docker.example .env.docker
-docker compose --env-file .env.docker up -d --build
+docker compose --env-file .env.docker --profile bundled up -d --build
 ```
+
+使用已有的外部 MySQL 和 Redis：
+
+```bash
+cp .env.docker.external.example .env.docker
+docker compose --env-file .env.docker up -d
+```
+
+Docker 网关默认监听宿主机 `0.0.0.0:6161`，公开地址、跨域来源和端口均通过
+`.env.docker` 配置，不绑定固定业务网址。
 
 ## 配置文件
 
 - `.env.example`：提交到 git 的模板。
+- `.env.docker.example`：自带独立 MySQL、Redis 容器的完整部署模板。
+- `.env.docker.external.example`：接入外部 MySQL、Redis 的部署模板。
 - `.env.local`：本机实际配置，已加入 `.gitignore`，不要提交。
 
 ## 上游约束
