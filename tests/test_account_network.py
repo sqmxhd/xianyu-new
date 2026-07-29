@@ -78,9 +78,7 @@ class AccountNetworkPolicyTests(unittest.TestCase):
 
     def test_account_input_only_accepts_managed_proxy_id(self) -> None:
         with self.assertRaisesRegex(ValidationError, "proxy_id"):
-            AccountCreatePayload(
-                account_name="seller",
-                proxy=ProxyConfigPayload(enabled=True, host="127.0.0.1", port=1080),
+            AccountCreatePayload(proxy=ProxyConfigPayload(enabled=True, host="127.0.0.1", port=1080),
             )
         with self.assertRaisesRegex(ValidationError, "proxy_id"):
             AccountUpdatePayload(proxy=ProxyConfigPayload())

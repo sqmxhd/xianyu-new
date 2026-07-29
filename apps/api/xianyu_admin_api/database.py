@@ -157,10 +157,6 @@ def _initialize_schema() -> None:
     added_columns = _apply_lightweight_migrations(engine)
     _migrate_chatwoot_platform_config(engine)
     _ensure_chatwoot_platform_indexes(engine)
-    _backfill_account_remarks(
-        engine,
-        column_added=("xianyu_accounts", "remark") in added_columns,
-    )
     _normalize_account_sort_order(engine)
     _migrate_auto_reply_ownership(engine)
     _migrate_auto_reply_v2(engine)
@@ -187,6 +183,8 @@ def _initialize_schema() -> None:
     _ensure_auto_reply_indexes(engine)
     _migrate_legacy_account_proxies(engine)
     _ensure_proxy_assignment_index(engine)
+    _drop_legacy_account_name(engine)
+    _drop_legacy_notification_tables(engine)
     _normalize_migrated_defaults(engine)
     _normalize_cookie_renewal_metadata(engine)
     _normalize_order_trade_roles(engine)
@@ -343,24 +341,6 @@ def _apply_lightweight_migrations(target_engine: Engine) -> set[tuple[str, str]]
                 connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
                 added_columns.add((table_name, column.name))
     return added_columns
-
-
-def _backfill_account_remarks(target_engine: Engine, *, column_added: bool) -> None:
-    if not column_added:
-        return
-    inspector = inspect(target_engine)
-    if "xianyu_accounts" not in inspector.get_table_names():
-        return
-    columns = {column["name"] for column in inspector.get_columns("xianyu_accounts")}
-    if not {"account_name", "remark"}.issubset(columns):
-        return
-    with target_engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE xianyu_accounts SET remark = account_name "
-                "WHERE (remark IS NULL OR remark = '') AND account_name IS NOT NULL"
-            )
-        )
 
 
 def _normalize_account_sort_order(target_engine: Engine) -> None:
@@ -1354,17 +1334,23 @@ def _migrate_legacy_account_proxies(target_engine: Engine) -> None:
     if "proxy_id" not in account_columns:
         return
 
+    display_name_column = (
+        "platform_display_name"
+        if "platform_display_name" in account_columns
+        else "NULL AS platform_display_name"
+    )
     with target_engine.begin() as connection:
         rows = connection.execute(
             text(
-                "SELECT account_id, account_name, proxy_enabled, proxy_scheme, proxy_host, "
+                f"SELECT account_id, {display_name_column}, proxy_enabled, proxy_scheme, proxy_host, "
                 "proxy_port, proxy_username, proxy_password FROM xianyu_accounts "
                 "WHERE proxy_id IS NULL AND proxy_host IS NOT NULL AND proxy_port IS NOT NULL"
             )
         ).mappings().all()
         for row in rows:
             proxy_id = uuid.uuid4().hex
-            name = f"legacy-{row['account_name']}-{str(row['account_id'])[:8]}"[:80]
+            label = str(row["platform_display_name"] or "").strip() or str(row["account_id"])[:8]
+            name = f"legacy-{label}-{str(row['account_id'])[:8]}"[:80]
             now = datetime.now(UTC)
             connection.execute(
                 text(
@@ -1421,16 +1407,23 @@ def _ensure_proxy_assignment_index(target_engine: Engine) -> None:
         ).mappings().all()
         if duplicate_rows:
             conflicts: list[str] = []
+            display_name_column = (
+                "platform_display_name"
+                if "platform_display_name" in columns
+                else "NULL AS platform_display_name"
+            )
             for duplicate in duplicate_rows:
                 accounts = connection.execute(
                     text(
-                        "SELECT account_id, account_name FROM xianyu_accounts "
+                        f"SELECT account_id, {display_name_column} FROM xianyu_accounts "
                         "WHERE proxy_id = :proxy_id ORDER BY created_at, account_id"
                     ),
                     {"proxy_id": duplicate["proxy_id"]},
                 ).mappings().all()
                 account_labels = ", ".join(
-                    f"{row['account_name']}({row['account_id']})" for row in accounts
+                    f"{str(row['platform_display_name'] or '').strip() or str(row['account_id'])[:8]}"
+                    f"({row['account_id']})"
+                    for row in accounts
                 )
                 conflicts.append(f"{duplicate['proxy_id']}: {account_labels}")
             raise RuntimeError(
@@ -1455,6 +1448,31 @@ def _ensure_proxy_assignment_index(target_engine: Engine) -> None:
     ):
         unique_index.drop(bind=target_engine, checkfirst=True)
     unique_index.create(bind=target_engine, checkfirst=True)
+
+
+def _drop_legacy_account_name(target_engine: Engine) -> None:
+    """Remove the retired editable account alias after dependent migrations."""
+
+    table_name = "xianyu_accounts"
+    inspector = inspect(target_engine)
+    if table_name not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    if "account_name" not in columns:
+        return
+    with target_engine.begin() as connection:
+        connection.execute(text("ALTER TABLE xianyu_accounts DROP COLUMN account_name"))
+
+
+def _drop_legacy_notification_tables(target_engine: Engine) -> None:
+    """Remove the retired Bark channel and its per-account switches."""
+
+    tables = set(inspect(target_engine).get_table_names())
+    with target_engine.begin() as connection:
+        if "xianyu_account_notifications" in tables:
+            connection.execute(text("DROP TABLE xianyu_account_notifications"))
+        if "xianyu_bark_config" in tables:
+            connection.execute(text("DROP TABLE xianyu_bark_config"))
 
 
 def _normalize_migrated_defaults(target_engine: Engine) -> None:

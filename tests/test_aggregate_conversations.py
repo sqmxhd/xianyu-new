@@ -37,11 +37,25 @@ class AggregateConversationTests(unittest.IsolatedAsyncioTestCase):
             UserCreatePayload(username="operator-two", password="12345678")
         )
         self.first_account = await self.store.create_account(
-            AccountCreatePayload(account_name="first-account", enabled=True)
+            AccountCreatePayload(enabled=True)
         )
         self.second_account = await self.store.create_account(
-            AccountCreatePayload(account_name="second-account", enabled=True)
+            AccountCreatePayload(enabled=True)
         )
+        self.first_account = await self.store.update_account_platform_identity(
+            self.first_account.account_id,
+            platform_user_id="seller-first",
+            display_name="first-account",
+            avatar_url=None,
+        )
+        self.second_account = await self.store.update_account_platform_identity(
+            self.second_account.account_id,
+            platform_user_id="seller-second",
+            display_name="second-account",
+            avatar_url=None,
+        )
+        assert self.first_account is not None
+        assert self.second_account is not None
 
     async def asyncTearDown(self) -> None:
         self.engine.dispose()
@@ -53,7 +67,7 @@ class AggregateConversationTests(unittest.IsolatedAsyncioTestCase):
                 conversation_id="shared-conversation-id",
                 direction="inbound",
                 message_type="text",
-                content=f"message from {account.account_name}",
+                content=f"message from {account.display_name}",
             )
 
         items, has_more, next_cursor = await self.store.list_conversations_for_user(

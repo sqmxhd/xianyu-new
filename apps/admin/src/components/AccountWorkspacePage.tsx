@@ -40,7 +40,7 @@ export function AccountWorkspacePage({
             placeholder="选择账户"
             value={selectedAccount?.account_id}
             options={accounts.map((account) => ({
-              label: account.account_name,
+              label: account.display_name,
               value: account.account_id
             }))}
             onChange={(accountId) => {
@@ -57,7 +57,7 @@ export function AccountWorkspacePage({
         </Space>
       </div>
       {selectedAccount ? (
-        <section className="workspace-content" aria-label={`${title}：${selectedAccount.account_name}`}>
+        <section className="workspace-content" aria-label={`${title}：${selectedAccount.display_name}`}>
           {children}
         </section>
       ) : (

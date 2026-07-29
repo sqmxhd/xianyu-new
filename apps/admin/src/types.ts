@@ -700,34 +700,6 @@ export interface LoginFormValues {
   password?: string;
 }
 
-export interface BarkConfig {
-  enabled: boolean;
-  server_url: string;
-  device_key: string;
-  sound?: string | null;
-  group?: string | null;
-  icon?: string | null;
-}
-
-export interface BarkTestPayload {
-  title: string;
-  body: string;
-}
-
-export interface NotificationResult {
-  ok: boolean;
-  message: string;
-  status_code?: number | null;
-  response_text?: string | null;
-}
-
-export interface AccountNotification {
-  account_id: string;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface AccountAutoReplyStatus {
   account_id: string;
   enabled: boolean;
@@ -1493,7 +1465,6 @@ export interface AuditLog {
 
 export interface Account {
   account_id: string;
-  account_name: string;
   remark?: string | null;
   display_name: string;
   platform: string;
@@ -1508,7 +1479,6 @@ export interface Account {
   chat_enabled: boolean;
   order_management_visible: boolean;
   product_management_visible: boolean;
-  notification_enabled: boolean;
   auto_reply_enabled: boolean;
   automation_owner_user_id?: string | null;
   has_cookie: boolean;
@@ -1602,6 +1572,8 @@ export interface ProxyTestResult {
 export interface ChatwootConfig {
   config_id: string;
   enabled: boolean;
+  account_alerts_enabled: boolean;
+  offline_alert_delay_seconds: number;
   base_url: string;
   inbox_identifier: string;
   chatwoot_inbox_id?: number | null;
@@ -1627,6 +1599,8 @@ export interface ChatwootConfig {
 
 export interface ChatwootConfigFormValues {
   enabled: boolean;
+  account_alerts_enabled: boolean;
+  offline_alert_delay_seconds: number;
   base_url: string;
   inbox_identifier: string;
   callback_url: string;

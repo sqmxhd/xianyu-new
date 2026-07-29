@@ -31,11 +31,11 @@ from .card_parser import (
     parse_message_cards,
     parse_order_event,
 )
+from .account_labels import platform_account_display_name
 from .database import SessionLocal, init_database
 from .executors import run_db_blocking
 from .orm import (
     AIProviderSettingORM,
-    AccountNotificationORM,
     AccountBrowserIdentityORM,
     AccountORM,
     AuditLogORM,
@@ -43,7 +43,6 @@ from .orm import (
     AutoReplyRuleORM,
     AutoReplySettingORM,
     BackgroundTaskORM,
-    BarkConfigORM,
     ConversationORM,
     ConversationReadStateORM,
     CookieRenewalAttemptORM,
@@ -86,8 +85,6 @@ from .schemas import (
     BrowserFingerprintSnapshotPayload,
     AccountAutoReplyUpdatePayload,
     AccountCreatePayload,
-    AccountNotificationPayload,
-    AccountNotificationUpdatePayload,
     AccountPayload,
     AccountReorderPayload,
     AccountUpdatePayload,
@@ -108,7 +105,6 @@ from .schemas import (
     AutoReplySettingUpdatePayload,
     BackgroundTaskCreatePayload,
     BackgroundTaskPayload,
-    BarkConfigPayload,
     ConversationPayload,
     CookieHealthPayload,
     CookieRenewalAttemptPayload,
@@ -172,7 +168,6 @@ from .sensitive import decrypt_sensitive, encrypt_sensitive
 
 ERROR_STATES = {"error", "auth_expired", "risk_blocked", "proxy_failed"}
 WARNING_STATES = {"disabled", "offline", "reconnecting"}
-BARK_CONFIG_ID = "default-bark"
 AI_PROVIDER_SETTING_ID = "default"
 DEFAULT_AUTO_REPLY_CONTEXT_FIELDS = [
     "account.name",
@@ -346,7 +341,6 @@ class ProductLocationCacheRecord:
 @dataclass(slots=True)
 class AccountRecord:
     account_id: str
-    account_name: str
     remark: str | None = None
     platform: str = "xianyu"
     platform_user_id: str | None = None
@@ -361,7 +355,6 @@ class AccountRecord:
     chat_enabled: bool = False
     order_management_visible: bool = True
     product_management_visible: bool = True
-    notification_enabled: bool = True
     auto_reply_enabled: bool = False
     automation_owner_user_id: str | None = None
     proxy_id: str | None = None
@@ -393,11 +386,10 @@ class AccountRecord:
 
     @property
     def display_name(self) -> str:
-        return (
-            str(self.platform_display_name or "").strip()
-            or str(self.remark or "").strip()
-            or self.account_name
-            or self.account_id
+        return platform_account_display_name(
+            self.account_id,
+            self.platform_display_name,
+            self.platform,
         )
 
     @property
@@ -419,7 +411,6 @@ class AccountRecord:
         )
         return AccountPayload(
             account_id=self.account_id,
-            account_name=self.account_name,
             remark=self.remark,
             display_name=self.display_name,
             platform=self.platform,
@@ -434,7 +425,6 @@ class AccountRecord:
             chat_enabled=self.chat_enabled,
             order_management_visible=self.order_management_visible,
             product_management_visible=self.product_management_visible,
-            notification_enabled=self.notification_enabled,
             auto_reply_enabled=self.auto_reply_enabled,
             automation_owner_user_id=self.automation_owner_user_id,
             has_cookie=bool(self.cookie),
@@ -1067,13 +1057,6 @@ class AccountStore:
         async with self._account_write_lock(account_id):
             await run_db_blocking(self._add_runtime_event_sync, account_id, state, message)
 
-    async def get_bark_config(self) -> BarkConfigPayload:
-        return await run_db_blocking(self._get_bark_config_sync)
-
-    async def update_bark_config(self, payload: BarkConfigPayload) -> BarkConfigPayload:
-        async with self._lock:
-            return await run_db_blocking(self._update_bark_config_sync, payload)
-
     async def list_background_tasks(
         self,
         account_id: str | None = None,
@@ -1188,24 +1171,6 @@ class AccountStore:
             actor=actor,
             client_ip=client_ip,
         )
-
-    async def get_account_notification(
-        self,
-        account_id: str,
-    ) -> AccountNotificationPayload | None:
-        return await run_db_blocking(self._get_account_notification_sync, account_id)
-
-    async def update_account_notification(
-        self,
-        account_id: str,
-        payload: AccountNotificationUpdatePayload,
-    ) -> AccountNotificationPayload | None:
-        async with self._account_write_lock(account_id):
-            return await run_db_blocking(
-                self._update_account_notification_sync,
-                account_id,
-                payload,
-            )
 
     async def get_auto_reply_setting(
         self,
@@ -2761,7 +2726,6 @@ class AccountStore:
                     joinedload(AccountORM.browser_identity),
                     joinedload(AccountORM.runtime),
                     joinedload(AccountORM.cookie_renewal),
-                    joinedload(AccountORM.notification_setting),
                     joinedload(AccountORM.auto_reply_setting),
                     joinedload(AccountORM.automation_owner).joinedload(
                         UserORM.auto_reply_setting
@@ -2784,7 +2748,6 @@ class AccountStore:
                     joinedload(AccountORM.browser_identity),
                     joinedload(AccountORM.runtime),
                     joinedload(AccountORM.cookie_renewal),
-                    joinedload(AccountORM.notification_setting),
                     joinedload(AccountORM.auto_reply_setting),
                     joinedload(AccountORM.automation_owner).joinedload(
                         UserORM.auto_reply_setting
@@ -2812,7 +2775,6 @@ class AccountStore:
                     joinedload(AccountORM.browser_identity),
                     joinedload(AccountORM.runtime),
                     joinedload(AccountORM.cookie_renewal),
-                    joinedload(AccountORM.notification_setting),
                     joinedload(AccountORM.auto_reply_setting),
                     joinedload(AccountORM.automation_owner).joinedload(
                         UserORM.auto_reply_setting
@@ -2875,7 +2837,7 @@ class AccountStore:
         owner: AccountORM,
     ) -> str:
         proxy_name = proxy.name if proxy is not None else owner.proxy_id
-        owner_name = owner.platform_display_name or owner.remark or owner.account_name
+        owner_name = owner.display_name
         return f"代理“{proxy_name}”已绑定账户“{owner_name}”，请先解绑后再操作"
 
     def _require_assignable_proxy(
@@ -2928,15 +2890,9 @@ class AccountStore:
     ) -> AccountRecord:
         now = utcnow()
         account_id = uuid.uuid4().hex
-        internal_name = (
-            str(payload.account_name or "").strip()
-            or str(payload.remark or "").strip()[:80]
-            or f"闲鱼账户-{account_id[:8]}"
-        )
         row = AccountORM(
             account_id=account_id,
-            account_name=internal_name,
-            remark=payload.remark if payload.remark is not None else payload.account_name,
+            remark=payload.remark,
             platform="xianyu",
             sort_order=0,
             cookie=payload.cookie,
@@ -2961,12 +2917,6 @@ class AccountStore:
         row.runtime = RuntimeStatusORM(
             account_id=account_id,
             state="stopped",
-            updated_at=now,
-        )
-        row.notification_setting = AccountNotificationORM(
-            account_id=account_id,
-            enabled=True,
-            created_at=now,
             updated_at=now,
         )
         row.auto_reply_setting = AutoReplySettingORM(
@@ -3036,8 +2986,6 @@ class AccountStore:
             if "proxy_id" in payload.model_fields_set and payload.proxy_id:
                 self._require_assignable_proxy(session, payload.proxy_id, account_id)
 
-            if payload.account_name is not None:
-                row.account_name = payload.account_name
             if "remark" in payload.model_fields_set:
                 row.remark = payload.remark
             if payload.cookie is not None and payload.cookie != row.cookie:
@@ -3851,25 +3799,6 @@ class AccountStore:
             self._add_event(session, account_id=account_id, state=state, message=message)
             session.commit()
 
-    def _get_bark_config_sync(self) -> BarkConfigPayload:
-        with self._session_factory() as session:
-            row = self._get_or_create_bark_config(session)
-            session.commit()
-            return self._bark_config_to_payload(row)
-
-    def _update_bark_config_sync(self, payload: BarkConfigPayload) -> BarkConfigPayload:
-        with self._session_factory() as session:
-            row = self._get_or_create_bark_config(session)
-            row.enabled = payload.enabled
-            row.server_url = payload.server_url.rstrip("/") or "https://api.day.app"
-            row.device_key = payload.device_key
-            row.sound = payload.sound or None
-            row.group = payload.group or None
-            row.icon = payload.icon or None
-            row.updated_at = utcnow()
-            session.commit()
-            return self._bark_config_to_payload(row)
-
     def _list_background_tasks_sync(
         self,
         account_id: str | None,
@@ -4169,33 +4098,6 @@ class AccountStore:
                 )
             )
             session.commit()
-
-    def _get_account_notification_sync(
-        self,
-        account_id: str,
-    ) -> AccountNotificationPayload | None:
-        with self._session_factory() as session:
-            account = session.get(AccountORM, account_id)
-            if account is None:
-                return None
-            row = self._get_or_create_account_notification(session, account_id)
-            session.commit()
-            return self._account_notification_to_payload(row)
-
-    def _update_account_notification_sync(
-        self,
-        account_id: str,
-        payload: AccountNotificationUpdatePayload,
-    ) -> AccountNotificationPayload | None:
-        with self._session_factory() as session:
-            account = session.get(AccountORM, account_id)
-            if account is None:
-                return None
-            row = self._get_or_create_account_notification(session, account_id)
-            row.enabled = payload.enabled
-            row.updated_at = utcnow()
-            session.commit()
-            return self._account_notification_to_payload(row)
 
     def _update_account_auto_reply_sync(
         self,
@@ -5136,7 +5038,7 @@ class AccountStore:
             created_at = str(created_at)
         return {
             "platform": {"code": account.platform or "xianyu", "name": "闲鱼"},
-            "account": {"id": account.account_id, "name": account.account_name},
+            "account": {"id": account.account_id, "name": account.display_name},
             "sender": {
                 "id": getattr(inbound_message, "peer_user_id", None)
                 or (conversation.peer_user_id if conversation else None),
@@ -6028,7 +5930,7 @@ class AccountStore:
                 self._conversation_to_payload(
                     conversation,
                     account_name=(
-                        account.platform_display_name or account.remark or account.account_name
+                        account.display_name
                     ),
                     platform=account.platform,
                     peer_avatar_url=avatars.get(
@@ -6153,7 +6055,7 @@ class AccountStore:
             return self._conversation_to_payload(
                 conversation,
                 account_name=(
-                    account.platform_display_name or account.remark or account.account_name
+                    account.display_name
                 ),
                 platform=account.platform,
                 peer_avatar_url=avatars.get(
@@ -6258,7 +6160,7 @@ class AccountStore:
             payload = self._conversation_to_payload(
                 conversation,
                 account_name=(
-                    account.platform_display_name or account.remark or account.account_name
+                    account.display_name
                 ),
                 platform=account.platform,
                 peer_avatar_url=avatars.get(
@@ -7687,7 +7589,7 @@ class AccountStore:
             return self._conversation_to_payload(
                 row,
                 account_name=(
-                    account.platform_display_name or account.remark or account.account_name
+                    account.display_name
                 ),
                 platform=account.platform,
                 peer_avatar_url=identity.avatar_url if identity else None,
@@ -10366,44 +10268,6 @@ class AccountStore:
         return row
 
     @staticmethod
-    def _get_or_create_bark_config(session: Session) -> BarkConfigORM:
-        row = session.get(BarkConfigORM, BARK_CONFIG_ID)
-        if row is not None:
-            return row
-
-        now = utcnow()
-        row = BarkConfigORM(
-            config_id=BARK_CONFIG_ID,
-            enabled=False,
-            server_url="https://api.day.app",
-            device_key="",
-            group="多平台管理",
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
-        return row
-
-    @staticmethod
-    def _get_or_create_account_notification(
-        session: Session,
-        account_id: str,
-    ) -> AccountNotificationORM:
-        row = session.get(AccountNotificationORM, account_id)
-        if row is not None:
-            return row
-
-        now = utcnow()
-        row = AccountNotificationORM(
-            account_id=account_id,
-            enabled=True,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
-        return row
-
-    @staticmethod
     def _get_or_create_auto_reply_setting(
         session: Session,
         account_id: str,
@@ -10516,7 +10380,6 @@ class AccountStore:
         identity = row.browser_identity
         return AccountRecord(
             account_id=row.account_id,
-            account_name=row.account_name,
             remark=row.remark,
             platform=row.platform or "xianyu",
             platform_user_id=row.platform_user_id,
@@ -10531,7 +10394,6 @@ class AccountStore:
             chat_enabled=row.chat_enabled,
             order_management_visible=row.order_management_visible,
             product_management_visible=row.product_management_visible,
-            notification_enabled=row.notification_setting.enabled if row.notification_setting else True,
             auto_reply_enabled=row.auto_reply_setting.enabled if row.auto_reply_setting else False,
             automation_owner_user_id=row.automation_owner_user_id,
             proxy_id=bound_proxy.proxy_id if bound_proxy else None,
@@ -10782,17 +10644,6 @@ class AccountStore:
             expires_at=as_utc(row.expires_at),
         )
 
-    @staticmethod
-    def _bark_config_to_payload(row: BarkConfigORM) -> BarkConfigPayload:
-        return BarkConfigPayload(
-            enabled=row.enabled,
-            server_url=row.server_url,
-            device_key=row.device_key,
-            sound=row.sound,
-            group=row.group,
-            icon=row.icon,
-        )
-
     @classmethod
     def _background_task_to_payload(cls, row: BackgroundTaskORM) -> BackgroundTaskPayload:
         return BackgroundTaskPayload(
@@ -10855,17 +10706,6 @@ class AccountStore:
             last_used_at=as_utc(row.last_used_at),
             created_at=as_utc(row.created_at),
             updated_at=as_utc(row.updated_at),
-        )
-
-    @staticmethod
-    def _account_notification_to_payload(
-        row: AccountNotificationORM,
-    ) -> AccountNotificationPayload:
-        return AccountNotificationPayload(
-            account_id=row.account_id,
-            enabled=row.enabled,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
         )
 
     @staticmethod
@@ -11047,7 +10887,7 @@ class AccountStore:
         return OrderPayload(
             order_pk=row.order_pk,
             account_id=row.account_id,
-            account_name=row.account.account_name if row.account else None,
+            account_name=row.account.display_name if row.account else None,
             platform=row.account.platform if row.account else "xianyu",
             platform_order_id=row.platform_order_id,
             trade_role=row.trade_role or "unknown",  # type: ignore[arg-type]
@@ -11463,12 +11303,8 @@ class AccountStore:
             else row.__dict__.get("account")
         )
         if account is not None:
-            resolved_account_name = resolved_account_name or account.account_name
-            resolved_account_display_name = (
-                str(account.platform_display_name or "").strip()
-                or str(account.remark or "").strip()
-                or account.account_name
-            )
+            resolved_account_name = resolved_account_name or account.display_name
+            resolved_account_display_name = account.display_name
             resolved_account_remark = account.remark
             resolved_platform = resolved_platform or account.platform
         resolved_platform = resolved_platform or "xianyu"

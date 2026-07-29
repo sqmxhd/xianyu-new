@@ -5,7 +5,6 @@ import type {
   AccountBrowserSession,
   AccountCookie,
   AccountFormValues,
-  AccountNotification,
   AdminUser,
   AuthSetupStatus,
   AuthToken,
@@ -24,8 +23,6 @@ import type {
   BrowserProfileCleanup,
   BrowserRuntimeSetting,
   BrowserBinary,
-  BarkConfig,
-  BarkTestPayload,
   ChatMessage,
   ChatwootConfig,
   ChatwootConfigFormValues,
@@ -46,7 +43,6 @@ import type {
   MessageCard,
   MessagePage,
   ManualTakeoverStatus,
-  NotificationResult,
   OrderDeliveryPreview,
   OrderDetail,
   OrderAction,
@@ -206,6 +202,13 @@ export function testChatwootConfig(): Promise<ChatwootTestResult> {
   });
 }
 
+export function testChatwootAccountAlerts(): Promise<ChatwootTestResult> {
+  return request<ChatwootTestResult>(
+    "/api/settings/message-services/chatwoot/account-alert-test",
+    { method: "POST" }
+  );
+}
+
 export function reorderAccounts(accountIds: string[]): Promise<Account[]> {
   return request<Account[]>("/api/accounts/order", {
     method: "PUT",
@@ -296,7 +299,6 @@ export function bootstrapAdminUser(
 
 export function startXianyuQRLogin(values: {
   account_id?: string | null;
-  account_name?: string | null;
   remark?: string | null;
   client_request_id?: string | null;
   proxy_id?: string | null;
@@ -975,40 +977,12 @@ export function setManualTakeover(
   );
 }
 
-export function getBarkConfig(): Promise<BarkConfig> {
-  return request<BarkConfig>("/api/notifications/bark");
-}
-
-export function updateBarkConfig(values: BarkConfig): Promise<BarkConfig> {
-  return request<BarkConfig>("/api/notifications/bark", {
-    method: "PUT",
-    body: JSON.stringify(values)
-  });
-}
-
-export function testBark(values: BarkTestPayload): Promise<NotificationResult> {
-  return request<NotificationResult>("/api/notifications/bark/test", {
-    method: "POST",
-    body: JSON.stringify(values)
-  });
-}
-
 export function listBackgroundTasks(limit = 100): Promise<BackgroundTask[]> {
   return request<BackgroundTask[]>(`/api/tasks?limit=${limit}`);
 }
 
 export function listAuditLogs(limit = 100): Promise<AuditLog[]> {
   return request<AuditLog[]>(`/api/audit-logs?limit=${limit}`);
-}
-
-export function updateAccountNotification(
-  accountId: string,
-  enabled: boolean
-): Promise<AccountNotification> {
-  return request<AccountNotification>(`/api/accounts/${accountId}/notification`, {
-    method: "PUT",
-    body: JSON.stringify({ enabled })
-  });
 }
 
 export function updateAccountAutoReply(

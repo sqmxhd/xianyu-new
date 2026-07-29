@@ -1,6 +1,6 @@
 # Xianyu Admin API
 
-Phase 1-15 Web 后端，提供账户、SOCKS5 代理、批量启动/停止、运行状态、运行事件、会话、消息、商品/订单卡片解析、Bark 通知、自动回复、发货前置、商品草稿、任务队列、安全鉴权和审计日志。
+Phase 1-15 Web 后端，提供账户、SOCKS5 代理、批量启动/停止、运行状态、运行事件、会话、消息、商品/订单卡片解析、Chatwoot 消息服务、自动回复、发货前置、商品草稿、任务队列、安全鉴权和审计日志。
 
 ## 数据库
 
@@ -18,8 +18,8 @@ export XIANYU_DATABASE_URL='mysql+pymysql://user:password@mysql-host:3306/xianyu
 - `xianyu_conversations`
 - `xianyu_messages`
 - `xianyu_message_cards`
-- `xianyu_bark_config`
-- `xianyu_account_notifications`
+- `xianyu_chatwoot_config`
+- `xianyu_chatwoot_inbox_bindings`
 - `xianyu_auto_reply_settings`
 - `xianyu_auto_reply_rules`
 - `xianyu_auto_reply_logs`
@@ -99,27 +99,22 @@ GET /api/accounts/{account_id}/conversations/{conversation_id}/cards
 - parser 不改 `third_party/XianYuApis`，只在本项目消息入库后处理 raw payload。
 - 解析规则保持保守，避免把普通文本误判为订单。
 
-## Bark 通知接口
+## Chatwoot 消息服务接口
 
 ```text
-GET  /api/notifications/bark
-PUT  /api/notifications/bark
-POST /api/notifications/bark/test
-GET  /api/accounts/{account_id}/notification
-PUT  /api/accounts/{account_id}/notification
+GET  /api/settings/message-services/chatwoot
+PUT  /api/settings/message-services/chatwoot
+POST /api/settings/message-services/chatwoot/test
+POST /api/settings/message-services/chatwoot/account-alert-test
+POST /api/integrations/chatwoot/webhook
 ```
-
-触发条件：
-
-- Bark 全局配置已启用。
-- Bark device key 已配置。
-- 账户级通知开关已启用。
-- runtime 收到入站消息并成功入库。
 
 说明：
 
-- Bark 通知是后台通知渠道，不走闲鱼账户 SOCKS5 代理。
-- 闲鱼 WS/MTOP 收发消息仍走账户绑定的 SOCKS5/SOCKS5h 代理。
+- Chatwoot 使用平台级配置；账户页的 `Chat` 开关控制账户是否接入。
+- 每个已接入账户使用独立 API Inbox，消息、客户和账户状态不会跨账户复用。
+- Cookie 确认失效立即提醒；普通 IM 掉线按平台设置延迟确认，恢复后补发恢复提醒。
+- 账户状态提醒使用独立系统会话，不会被转发到闲鱼客户。
 
 ## 自动回复接口
 

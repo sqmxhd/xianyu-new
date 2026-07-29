@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -18,22 +19,29 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from apps.api.xianyu_admin_api.chatwoot import (
+    CHATWOOT_ACCOUNT_ALERT_TASK,
     CHATWOOT_OUTBOUND_AUDIO_UNSUPPORTED_MESSAGE,
     ChatwootIntegrationError,
     ChatwootRepository,
+    _account_alert_content,
     _account_label_title,
     _chatwoot_inbound_content,
     _contact_identity_payload,
+    _ensure_account_alert_conversation,
     _ensure_managed_account_inbox,
     _ensure_remote_conversation,
     _has_audio_attachment,
     _managed_inbox_name,
+    _create_private_recall_snapshot,
+    _recall_snapshot_payload,
     _visible_contact_name,
     _chatwoot_request,
     _download_image,
     _download_xianyu_audio,
     _extract_xianyu_audio_url,
     accept_chatwoot_webhook,
+    enqueue_account_alert_sync,
+    execute_account_alert_task,
     execute_local_message_task,
     execute_account_metadata_task,
     execute_webhook_task,
@@ -415,11 +423,17 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.repository = ChatwootRepository(self.session_factory)
         self.account = await self.store.create_account(
             AccountCreatePayload(
-                account_name="chatwoot-test",
                 enabled=True,
                 chat_enabled=True,
             )
         )
+        self.account = await self.store.update_account_platform_identity(
+            self.account.account_id,
+            platform_user_id="seller-chatwoot-test",
+            display_name="chatwoot-test",
+            avatar_url=None,
+        )
+        assert self.account is not None
 
     async def asyncTearDown(self) -> None:
         self.engine.dispose()
@@ -451,10 +465,102 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_recall_snapshot_contains_original_text_image_and_result(self) -> None:
+        content, image_urls = _recall_snapshot_payload(
+            [
+                {
+                    "message_pk": "text-piece",
+                    "created_at_ms": 1_800_000_000_000,
+                    "created_at": "2027-01-15T08:00:00+00:00",
+                    "message_type": "text",
+                    "content": "原始文字",
+                    "attachments": [],
+                },
+                {
+                    "message_pk": "image-piece",
+                    "created_at_ms": 1_800_000_000_001,
+                    "created_at": "2027-01-15T08:00:00.001000+00:00",
+                    "message_type": "image",
+                    "content": "https://cdn.example/original.jpg",
+                    "attachments": [
+                        {
+                            "attachment_type": "image",
+                            "remote_url": "https://cdn.example/original.jpg",
+                        }
+                    ],
+                },
+            ],
+            succeeded=True,
+            error=None,
+        )
+
+        self.assertIn("原消息（2027-01-15 16:00:00 上海时间）", content)
+        self.assertIn("原始文字", content)
+        self.assertIn("↩ 闲鱼消息已撤回", content)
+        self.assertNotIn("https://cdn.example/original.jpg", content)
+        self.assertEqual(image_urls, ["https://cdn.example/original.jpg"])
+
+    async def test_private_recall_snapshot_uploads_images_as_private_note(
+        self,
+    ) -> None:
+        config = {
+            "base_url": "https://chatwoot.internal",
+            "chatwoot_account_id": 3,
+            "api_access_token": "service-token",
+        }
+        request_mock = MagicMock(return_value=(200, {"id": 900}))
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._download_image",
+                new=MagicMock(
+                    return_value=(b"jpeg-data", "image/jpeg", "original.jpg")
+                ),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+                new=request_mock,
+            ),
+        ):
+            created = await _create_private_recall_snapshot(
+                config,
+                chatwoot_conversation_id="88",
+                chatwoot_message_id="99",
+                contexts=[
+                    {
+                        "message_pk": "image-piece",
+                        "message_type": "image",
+                        "content": "https://cdn.example/original.jpg",
+                        "attachments": [
+                            {
+                                "attachment_type": "image",
+                                "remote_url": "https://cdn.example/original.jpg",
+                            }
+                        ],
+                    }
+                ],
+                succeeded=True,
+                error=None,
+            )
+
+        self.assertTrue(created)
+        request_mock.assert_called_once()
+        call = request_mock.call_args
+        self.assertEqual(call.args[0], "POST")
+        self.assertEqual(call.kwargs["data"]["private"], "true")
+        self.assertEqual(
+            call.kwargs["data"][
+                "content_attributes[xianyu_deleted_source_message_id]"
+            ],
+            "99",
+        )
+        self.assertEqual(call.kwargs["files"][0][1][0], "original.jpg")
+
     async def test_config_secrets_are_encrypted_and_exposed_to_admin_payload(self) -> None:
         config = await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
+                account_alerts_enabled=True,
+                offline_alert_delay_seconds=180,
                 base_url="http://chatwoot.internal:3000/",
                 inbox_identifier="inbox-identifier",
                 webhook_secret="webhook-secret-value",
@@ -468,6 +574,8 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config.has_client_hmac_token)
         self.assertTrue(config.has_api_access_token)
         self.assertTrue(config.full_outbound_sync_enabled)
+        self.assertTrue(config.account_alerts_enabled)
+        self.assertEqual(config.offline_alert_delay_seconds, 180)
         self.assertFalse(config.account_grouping_enabled)
         self.assertEqual(config.webhook_secret, "webhook-secret-value")
         self.assertEqual(config.client_hmac_token, "client-hmac-token")
@@ -478,6 +586,219 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(row.webhook_secret_encrypted, "webhook-secret-value")
             self.assertNotEqual(row.client_hmac_token_encrypted, "client-hmac-token")
             self.assertNotEqual(row.api_access_token_encrypted, "service-account-token")
+
+    async def test_offline_alert_is_delayed_and_enqueued_once(self) -> None:
+        queued_task = SimpleNamespace(task_id="task-alert", status="pending")
+        store = SimpleNamespace(
+            session_factory=self.session_factory,
+            create_background_task=AsyncMock(return_value=queued_task),
+            mark_background_task_queued=AsyncMock(),
+        )
+        with (
+            patch.object(
+                ChatwootRepository,
+                "get_config",
+                AsyncMock(
+                    return_value={
+                        "enabled": True,
+                        "account_alerts_enabled": True,
+                        "offline_alert_delay_seconds": 180,
+                    }
+                ),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot.enqueue_background_task",
+                AsyncMock(return_value=SimpleNamespace(queued=True)),
+            ),
+        ):
+            before = datetime.now(UTC)
+            await enqueue_account_alert_sync(
+                store,
+                account_id=self.account.account_id,
+                state="offline",
+                message="连接中断",
+            )
+
+        payload = store.create_background_task.await_args.args[0]
+        self.assertEqual(payload.task_type, CHATWOOT_ACCOUNT_ALERT_TASK)
+        self.assertEqual(payload.payload["expected_state"], "offline")
+        self.assertIsNotNone(payload.run_after)
+        assert payload.run_after is not None
+        delay = (payload.run_after - before).total_seconds()
+        self.assertGreaterEqual(delay, 179)
+        self.assertLessEqual(delay, 181)
+        store.mark_background_task_queued.assert_awaited_once_with("task-alert")
+
+    async def test_delayed_alert_is_skipped_after_account_recovers(self) -> None:
+        with patch.object(
+            ChatwootRepository,
+            "get_config",
+            AsyncMock(
+                return_value={
+                    "enabled": True,
+                    "account_alerts_enabled": True,
+                    "account_state": "online",
+                }
+            ),
+        ), patch(
+            "apps.api.xianyu_admin_api.chatwoot._chatwoot_request"
+        ) as request:
+            result = await execute_account_alert_task(
+                self.store,
+                account_id=self.account.account_id,
+                state="offline",
+                message="连接中断",
+                expected_state="offline",
+            )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["current_state"], "online")
+        request.assert_not_called()
+
+    async def test_account_alert_uses_dedicated_incoming_event_conversation(
+        self,
+    ) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                account_alerts_enabled=True,
+                base_url="https://chatwoot.internal",
+                inbox_identifier="legacy-inbox",
+                webhook_secret="legacy-secret",
+                chatwoot_account_id=3,
+                api_access_token="service-token",
+            )
+        )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="managed-secret",
+            label_id=None,
+            label_title=None,
+        )
+
+        def fake_request(method: str, url: str, **kwargs: object):
+            if url.endswith("/toggle_status"):
+                return 200, {}
+            if url.endswith("/messages"):
+                return 200, {"id": 901}
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._ensure_account_alert_conversation",
+                AsyncMock(return_value=("alert-source", "77")),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+                side_effect=fake_request,
+            ) as request,
+        ):
+            failed = await execute_account_alert_task(
+                self.store,
+                account_id=self.account.account_id,
+                state="offline",
+                message="连接持续中断",
+            )
+            duplicate = await execute_account_alert_task(
+                self.store,
+                account_id=self.account.account_id,
+                state="offline",
+                message="连接持续中断",
+            )
+            recovered = await execute_account_alert_task(
+                self.store,
+                account_id=self.account.account_id,
+                state="online",
+                message="连接已恢复",
+            )
+
+        self.assertEqual(failed["chatwoot_message_id"], "901")
+        self.assertTrue(duplicate["skipped"])
+        self.assertEqual(recovered["previous_state"], "offline")
+        message_calls = [
+            call
+            for call in request.call_args_list
+            if call.args[1].endswith("/messages")
+        ]
+        self.assertEqual(len(message_calls), 2)
+        self.assertIn(
+            "/public/api/v1/inboxes/managed-inbox/contacts/"
+            "alert-source/conversations/77/messages",
+            message_calls[0].args[1],
+        )
+        self.assertIn("上海时间", message_calls[0].kwargs["json_body"]["content"])
+
+    async def test_account_alert_channel_is_persisted_per_managed_inbox(
+        self,
+    ) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="https://chatwoot.internal",
+                inbox_identifier="legacy-inbox",
+                webhook_secret="legacy-secret",
+                chatwoot_account_id=3,
+                api_access_token="service-token",
+            )
+        )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="managed-secret",
+            label_id=None,
+            label_title=None,
+        )
+        config = await self.repository.get_config(account_id=self.account.account_id)
+        assert config is not None
+
+        def fake_request(method: str, url: str, **kwargs: object):
+            if method == "POST" and url.endswith("/contacts"):
+                return 200, {"id": 51}
+            if method == "PATCH" and "/contacts/" in url:
+                return 200, {}
+            if method == "POST" and url.endswith("/conversations"):
+                return 200, {"id": 77}
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._ensure_managed_account_inbox",
+                AsyncMock(return_value=config),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+                side_effect=fake_request,
+            ),
+        ):
+            source_id, conversation_id = await _ensure_account_alert_conversation(
+                self.repository,
+                config,
+            )
+
+        binding = await self.repository.get_inbox_binding(self.account.account_id)
+        assert binding is not None
+        self.assertEqual(conversation_id, "77")
+        self.assertEqual(binding["alert_source_id"], source_id)
+        self.assertEqual(binding["alert_contact_id"], "51")
+        self.assertEqual(binding["alert_conversation_id"], "77")
+
+    def test_account_alert_content_uses_shanghai_time(self) -> None:
+        content = _account_alert_content(
+            {
+                "platform": "xianyu",
+                "platform_name": "闲鱼",
+                "account_id": "account-1",
+                "account_name": "账号甲",
+            },
+            state="test",
+            message=None,
+        )
+        self.assertIn("平台：闲鱼", content)
+        self.assertIn("账户：账号甲", content)
+        self.assertIn("上海时间", content)
 
     async def test_managed_inbox_secret_is_scoped_by_remote_inbox_id(self) -> None:
         await self.repository.upsert_config(
@@ -1399,9 +1720,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_webhook_routes_to_the_account_owned_by_the_conversation(self) -> None:
         second_account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="chatwoot-second",
-                enabled=True,
+            AccountCreatePayload(enabled=True,
                 chat_enabled=True,
             )
         )
@@ -1710,10 +2029,16 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._create_private_delivery_note",
-            new=AsyncMock(return_value=True),
-        ) as create_private_note:
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_recall_snapshot_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._create_private_recall_snapshot",
+                new=AsyncMock(return_value=True),
+            ) as create_snapshot,
+        ):
             result = await execute_webhook_task(
                 self.store,
                 delivery_id="delivery-recall",
@@ -1745,14 +2070,139 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 "message_pk": outbound.message_pk,
             },
         )
-        create_private_note.assert_awaited_once_with(
+        create_snapshot.assert_awaited_once()
+        snapshot_kwargs = create_snapshot.await_args.kwargs
+        self.assertEqual(snapshot_kwargs["chatwoot_conversation_id"], "88")
+        self.assertEqual(snapshot_kwargs["chatwoot_message_id"], "99")
+        self.assertTrue(snapshot_kwargs["succeeded"])
+        self.assertIsNone(snapshot_kwargs["error"])
+        self.assertEqual(snapshot_kwargs["contexts"][0]["content"], "reply")
+        self.assertEqual(
+            snapshot_kwargs["contexts"][0]["message_pk"],
+            outbound.message_pk,
+        )
+        self.assertTrue(result["private_snapshot_created"])
+        self.assertFalse(duplicate_result["private_snapshot_created"])
+        create_snapshot.assert_awaited_once_with(
             ANY,
             chatwoot_conversation_id="88",
-            content="↩ 闲鱼消息已撤回（Chatwoot 原消息已删除）",
+            chatwoot_message_id="99",
+            contexts=ANY,
+            succeeded=True,
+            error=None,
         )
         mappings = await self.repository.find_message_maps_by_remote(
             self.account.account_id,
             "99",
+        )
+        self.assertEqual(mappings[0]["state"], "recalled")
+
+    async def test_deleted_message_retries_snapshot_without_recalling_again(
+        self,
+    ) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="http://chatwoot.internal:3000",
+                inbox_identifier="inbox-identifier",
+                webhook_secret="webhook-secret-value",
+                chatwoot_account_id=1,
+                api_access_token="service-token",
+            )
+        )
+        await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-snapshot-retry",
+            direction="inbound",
+            message_type="text",
+            content="hello",
+            peer_user_id="buyer-snapshot-retry",
+        )
+        outbound = await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-snapshot-retry",
+            direction="outbound",
+            message_type="text",
+            content="需要恢复的原消息",
+            message_id="platform-snapshot-retry",
+            peer_user_id="buyer-snapshot-retry",
+            send_success=True,
+        )
+        assert outbound is not None
+        await self.repository.create_conversation_map(
+            account_id=self.account.account_id,
+            conversation_id="conversation-snapshot-retry",
+            peer_user_id="buyer-snapshot-retry",
+            source_id="source-snapshot-retry",
+            chatwoot_conversation_id="388",
+        )
+        await self.repository.record_message_map(
+            account_id=self.account.account_id,
+            message_pk=outbound.message_pk,
+            chatwoot_message_id="399",
+            chatwoot_conversation_id="388",
+            origin="chatwoot",
+            state="synced",
+        )
+        webhook_payload = {
+            "event": "message_updated",
+            "id": 399,
+            "message_type": "outgoing",
+            "content_attributes": {"deleted": True},
+            "conversation": {"id": 388},
+        }
+        raw = json.dumps(webhook_payload).encode()
+        await self.repository.record_webhook(
+            delivery_id="delivery-snapshot-retry",
+            event_name="message_updated",
+            payload_sha256=hashlib.sha256(raw).hexdigest(),
+            raw_payload=raw,
+        )
+        runtime_command = AsyncMock(
+            return_value={
+                "success": True,
+                "message_pk": outbound.message_pk,
+            }
+        )
+        create_snapshot = AsyncMock(
+            side_effect=[RuntimeError("Chatwoot temporarily unavailable"), True]
+        )
+
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_recall_snapshot_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._create_private_recall_snapshot",
+                new=create_snapshot,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
+                await execute_webhook_task(
+                    self.store,
+                    delivery_id="delivery-snapshot-retry",
+                    runtime_command=runtime_command,
+                )
+            pending = await self.repository.find_message_maps_by_remote(
+                self.account.account_id,
+                "399",
+            )
+            self.assertEqual(pending[0]["state"], "recall_snapshot_pending")
+
+            result = await execute_webhook_task(
+                self.store,
+                delivery_id="delivery-snapshot-retry",
+                runtime_command=runtime_command,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["private_snapshot_created"])
+        runtime_command.assert_awaited_once()
+        self.assertEqual(create_snapshot.await_count, 2)
+        mappings = await self.repository.find_message_maps_by_remote(
+            self.account.account_id,
+            "399",
         )
         self.assertEqual(mappings[0]["state"], "recalled")
 
@@ -1824,10 +2274,16 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._create_private_delivery_note",
-            new=AsyncMock(return_value=True),
-        ) as create_private_note:
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_recall_snapshot_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._create_private_recall_snapshot",
+                new=AsyncMock(return_value=True),
+            ) as create_snapshot,
+        ):
             result = await execute_webhook_task(
                 self.store,
                 delivery_id="delivery-delete-failed",
@@ -1837,10 +2293,14 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(result["platform_recall"])
         self.assertEqual(result["failed_messages"], 1)
-        create_private_note.assert_awaited_once()
+        create_snapshot.assert_awaited_once()
         self.assertIn(
             "消息已超过两分钟撤回时限",
-            create_private_note.await_args.kwargs["content"],
+            create_snapshot.await_args.kwargs["error"],
+        )
+        self.assertEqual(
+            create_snapshot.await_args.kwargs["contexts"][0]["content"],
+            "reply",
         )
         mappings = await self.repository.find_message_maps_by_remote(
             self.account.account_id,

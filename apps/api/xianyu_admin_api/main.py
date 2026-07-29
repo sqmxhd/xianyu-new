@@ -32,7 +32,6 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .notifications import BarkNotifier
 from integrations.xianyu_core.images import (
     MAX_IMAGE_INPUT_BYTES,
     ImageValidationError,
@@ -60,6 +59,7 @@ from .chatwoot import (
     accept_chatwoot_webhook,
     enqueue_account_metadata_sync,
     enqueue_account_status_sync,
+    execute_account_alert_task,
     reconcile_chatwoot_read_states,
     test_chatwoot_config,
 )
@@ -81,8 +81,6 @@ from .schemas import (
     AccountCreatePayload,
     AccountCookiePayload,
     AccountConnectionHealthPayload,
-    AccountNotificationPayload,
-    AccountNotificationUpdatePayload,
     AccountPayload,
     AccountReorderPayload,
     AccountUpdatePayload,
@@ -103,8 +101,6 @@ from .schemas import (
     AutoReplyRuleUpdatePayload,
     BackgroundTaskCreatePayload,
     BackgroundTaskPayload,
-    BarkConfigPayload,
-    BarkTestPayload,
     BrowserProfileActionPayload,
     BrowserProfileCleanupPayload,
     BrowserProfilePayload,
@@ -136,7 +132,6 @@ from .schemas import (
     MessagePagePayload,
     ManualTakeoverPayload,
     ManualTakeoverStatusPayload,
-    NotificationResultPayload,
     OrderDeliveryPreviewPayload,
     OrderDeliveryPreviewRequest,
     OrderDetailPayload,
@@ -238,8 +233,7 @@ from .im_verification import (
 
 store = AccountStore()
 chatwoot_repository = ChatwootRepository(store.session_factory)
-notifier = BarkNotifier(store)
-runtime_manager = AccountRuntimeManager(store, notifier)
+runtime_manager = AccountRuntimeManager(store)
 cookie_renewal_manager = CookieRenewalManager(store, runtime_manager)
 im_verification_manager = IMVerificationManager(
     store,
@@ -468,7 +462,6 @@ async def _persist_qr_login_credentials(
         try:
             account = await store.create_account(
                 AccountCreatePayload(
-                    account_name=session.account_name,
                     remark=session.remark,
                     cookie=cookie,
                     proxy_id=session.proxy_id,
@@ -598,7 +591,6 @@ ADMIN_ONLY_PREFIXES = (
     "/api/users",
     "/api/tasks",
     "/api/audit-logs",
-    "/api/notifications/bark",
     "/api/settings/ai-provider",
     "/api/settings/browser-runtime",
     "/api/settings/message-services",
@@ -1280,8 +1272,7 @@ async def start_xianyu_qr_login(
     account = await store.get_account(payload.account_id) if payload.account_id else None
     if payload.account_id and account is None:
         raise HTTPException(status_code=404, detail="account not found")
-    account_name = account.account_name if account else payload.account_name
-    remark = account.remark if account else payload.remark or payload.account_name
+    remark = account.remark if account else payload.remark
     browser_identity = (
         account.browser_identity
         if account is not None
@@ -1337,7 +1328,6 @@ async def start_xianyu_qr_login(
 
         session = QRLoginSession(
             account_id=account.account_id if account else None,
-            account_name=account_name,
             remark=remark,
             automation_owner_user_id=(
                 account.automation_owner_user_id
@@ -2349,21 +2339,6 @@ async def list_runtime_events(
     return await store.list_runtime_events(limit=limit)
 
 
-@app.get("/api/notifications/bark", response_model=BarkConfigPayload)
-async def get_bark_config() -> BarkConfigPayload:
-    return await store.get_bark_config()
-
-
-@app.put("/api/notifications/bark", response_model=BarkConfigPayload)
-async def update_bark_config(payload: BarkConfigPayload) -> BarkConfigPayload:
-    return await store.update_bark_config(payload)
-
-
-@app.post("/api/notifications/bark/test", response_model=NotificationResultPayload)
-async def test_bark(payload: BarkTestPayload) -> NotificationResultPayload:
-    return await notifier.test(title=payload.title, body=payload.body)
-
-
 @app.get("/api/tasks", response_model=list[BackgroundTaskPayload])
 async def list_background_tasks(
     account_id: str | None = None,
@@ -2388,29 +2363,6 @@ async def list_audit_logs(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AuditLogPayload]:
     return await store.list_audit_logs(limit=limit)
-
-
-@app.get("/api/accounts/{account_id}/notification", response_model=AccountNotificationPayload)
-async def get_account_notification(account_id: str) -> AccountNotificationPayload:
-    record = await store.get_account(account_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="account not found")
-    payload = await store.get_account_notification(account_id)
-    assert payload is not None
-    return payload
-
-
-@app.put("/api/accounts/{account_id}/notification", response_model=AccountNotificationPayload)
-async def update_account_notification(
-    account_id: str,
-    payload: AccountNotificationUpdatePayload,
-) -> AccountNotificationPayload:
-    record = await store.get_account(account_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="account not found")
-    updated = await store.update_account_notification(account_id, payload)
-    assert updated is not None
-    return updated
 
 
 @app.put(
@@ -2499,6 +2451,51 @@ async def test_saved_chatwoot_config() -> ChatwootTestResultPayload:
     if not result.success:
         raise HTTPException(status_code=503, detail=result.message)
     return result
+
+
+@app.post(
+    "/api/settings/message-services/chatwoot/account-alert-test",
+    response_model=ChatwootTestResultPayload,
+)
+async def test_chatwoot_account_alerts() -> ChatwootTestResultPayload:
+    candidates = [
+        account
+        for account in await store.list_accounts()
+        if account.enabled and account.chat_enabled
+    ]
+    if not candidates:
+        raise HTTPException(
+            status_code=409,
+            detail="没有已启用 Chat 的平台账户，无法发送账户状态测试提醒",
+        )
+    delivered = 0
+    failures: list[str] = []
+    for account in candidates:
+        try:
+            result = await execute_account_alert_task(
+                store,
+                account_id=account.account_id,
+                state="test",
+                message="这是平台发出的账户状态提醒测试消息",
+                force=True,
+            )
+        except Exception as exc:
+            failures.append(f"{account.display_name}: {exc}")
+            continue
+        if result.get("ok") and not result.get("skipped"):
+            delivered += 1
+    if failures:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"已发送 {delivered} 个账户提醒，"
+                f"{len(failures)} 个失败：{'；'.join(failures)}"
+            ),
+        )
+    return ChatwootTestResultPayload(
+        success=True,
+        message=f"已向 Chatwoot 发送 {delivered} 个账户状态测试提醒",
+    )
 
 
 @app.post(

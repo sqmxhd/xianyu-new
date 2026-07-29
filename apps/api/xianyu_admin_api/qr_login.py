@@ -71,7 +71,6 @@ class _TimeoutSession(requests.Session):
 @dataclass(slots=True)
 class QRLoginSession:
     account_id: str | None
-    account_name: str | None
     proxy_id: str | None
     proxy: ProxyConfigPayload
     browser_identity: AccountBrowserIdentityPayload = field(

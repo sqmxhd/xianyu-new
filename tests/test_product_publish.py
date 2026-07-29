@@ -628,9 +628,7 @@ class ProductPublishStoreTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = factory
         self.store = AccountStore(session_factory=factory, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="publish-account",
-                cookie="unb=10001; _m_h5_tk=oldtoken_1; keep=value",
+            AccountCreatePayload(cookie="unb=10001; _m_h5_tk=oldtoken_1; keep=value",
                 enabled=True,
             )
         )
@@ -727,9 +725,7 @@ class ProductPublishStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_publish_rejects_disabled_account(self):
         disabled = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="disabled-publish-account",
-                cookie="unb=10002; _m_h5_tk=token_1",
+            AccountCreatePayload(cookie="unb=10002; _m_h5_tk=token_1",
                 enabled=False,
             )
         )
@@ -973,9 +969,7 @@ class ProductPublishStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_idempotency_is_account_scoped_and_background_task_is_deduped(self):
         second_account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="publish-account-two",
-                cookie="unb=10002; _m_h5_tk=oldtoken_1",
+            AccountCreatePayload(cookie="unb=10002; _m_h5_tk=oldtoken_1",
                 enabled=False,
             )
         )

@@ -143,7 +143,6 @@ import {
   deleteProxy,
   checkDeliveryPreflight,
   getAIProviderSetting,
-  getBarkConfig,
   getBrowserRuntimeSetting,
   getDeliveryAutomationSetting,
   getAccount,
@@ -220,18 +219,16 @@ import {
   startCookieRenewal,
   stopBrowserProfile,
   startXianyuQRLogin,
-  testBark,
+  testChatwootAccountAlerts,
   testChatwootConfig,
   testProxy,
   updateAccount,
   updateAccountAutoReply,
-  updateAccountNotification,
   updateAccountWorkspaceVisibility,
   updateAIProviderSetting,
   reorderAccounts,
   reorderAutoReplyRules,
   updateAutoReplyRule,
-  updateBarkConfig,
   updateDeliveryAutomationSetting,
   updateDeliveryTemplate,
   updateProductDraft,
@@ -307,7 +304,6 @@ import type {
   AutoReplyRuleFormValues,
   AutoReplyRuleIssue,
   BackgroundTask,
-  BarkConfig,
   BrowserProfile,
   BrowserFingerprintSnapshot,
   BrowserEngine,
@@ -1397,7 +1393,6 @@ function platformName(platform?: string | null): string {
 type AccountLabelSource = {
   account_id?: string | null;
   account_name?: string | null;
-  remark?: string | null;
   display_name?: string | null;
   platform_display_name?: string | null;
 };
@@ -1409,7 +1404,6 @@ function rawPlatformAccountName(account?: AccountLabelSource | null): string {
 function rawAccountDisplayName(account?: AccountLabelSource | null): string {
   return (
     account?.platform_display_name?.trim() ||
-    account?.remark?.trim() ||
     account?.display_name?.trim() ||
     account?.account_name?.trim() ||
     account?.account_id ||
@@ -1564,7 +1558,6 @@ type AdminMenuKey =
   | "products"
   | "events"
   | "tasks"
-  | "notifications"
   | "audit"
   | "settings";
 
@@ -1630,7 +1623,6 @@ const menuTitles: Record<AdminMenuKey, string> = {
   products: "商品发布",
   events: "运行事件",
   tasks: "后台任务",
-  notifications: "通知设置",
   audit: "审计日志",
   settings: "系统设置"
 };
@@ -1646,7 +1638,6 @@ const menuPaths: Record<AdminMenuKey, string> = {
   products: "/products",
   events: "/events",
   tasks: "/tasks",
-  notifications: "/notifications",
   audit: "/audit",
   settings: "/settings"
 };
@@ -1655,7 +1646,7 @@ const pathMenus = Object.fromEntries(
   Object.entries(menuPaths).map(([key, path]) => [path, key as AdminMenuKey])
 ) as Record<string, AdminMenuKey>;
 
-const adminMenus = new Set<AdminMenuKey>(["users", "tasks", "notifications", "audit"]);
+const adminMenus = new Set<AdminMenuKey>(["users", "tasks", "audit"]);
 const viewerMenus = new Set<AdminMenuKey>([
   "dashboard",
   "accounts",
@@ -1709,6 +1700,7 @@ export default function App() {
   const [chatwootLoading, setChatwootLoading] = useState(false);
   const [chatwootSaving, setChatwootSaving] = useState(false);
   const [chatwootTesting, setChatwootTesting] = useState(false);
+  const [chatwootAlertTesting, setChatwootAlertTesting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [recoveringAccountId, setRecoveringAccountId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1964,8 +1956,6 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [barkSaving, setBarkSaving] = useState(false);
-  const [barkTesting, setBarkTesting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loginForm] = Form.useForm<LoginFormValues>();
   const [userForm] = Form.useForm<UserFormValues>();
@@ -1978,7 +1968,6 @@ export default function App() {
   const [proxyForm] = Form.useForm<ProxyFormValues>();
   const [chatwootForm] = Form.useForm<ChatwootConfigFormValues>();
   const chatwootCallbackUrlValue = Form.useWatch("callback_url", chatwootForm);
-  const [barkForm] = Form.useForm<BarkConfig & { test_title: string; test_body: string }>();
   const [sendForm] = Form.useForm<SendTextFormValues>();
   const [quickPhraseForm] = Form.useForm<QuickPhraseFormValues>();
   const [ruleForm] = Form.useForm<AutoReplyRuleFormValues>();
@@ -2317,19 +2306,6 @@ export default function App() {
     }
   }
 
-  async function loadBarkConfig() {
-    try {
-      const config = await getBarkConfig();
-      barkForm.setFieldsValue({
-        ...config,
-        test_title: "多平台管理测试通知",
-        test_body: "Bark 通知配置可用。"
-      });
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "加载 Bark 配置失败");
-    }
-  }
-
   async function loadUsers() {
     setUsersLoading(true);
     try {
@@ -2359,9 +2335,6 @@ export default function App() {
       if (ok) {
         setCurrentUser(user);
         setAuthenticated(true);
-        if (user.role === "admin") {
-          void loadBarkConfig();
-        }
       } else {
         clearStoredAccessToken();
         setAuthenticated(false);
@@ -2394,9 +2367,6 @@ export default function App() {
         return;
       }
       setAuthenticated(true);
-      if (result.user.role === "admin") {
-        await loadBarkConfig();
-      }
       message.success("登录成功");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "登录失败");
@@ -2422,7 +2392,6 @@ export default function App() {
       }
       setAuthenticated(true);
       setSetupInitialized(true);
-      await loadBarkConfig();
       message.success("首个管理员已初始化");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "初始化管理员失败");
@@ -3250,7 +3219,6 @@ export default function App() {
       if (tab === "users") void loadUsers();
       if (tab === "browsers") void loadBrowserRuntime();
       if (tab === "message-services") {
-        void loadBarkConfig();
         void loadChatwootData();
       }
       if (tab === "audit") void loadAuditLogs();
@@ -4398,70 +4366,6 @@ export default function App() {
     });
   }
 
-  async function saveBarkConfig() {
-    const values = await barkForm.validateFields();
-    setBarkSaving(true);
-    try {
-      await updateBarkConfig({
-        enabled: values.enabled,
-        server_url: values.server_url,
-        device_key: values.device_key,
-        sound: values.sound || null,
-        group: values.group || null,
-        icon: values.icon || null
-      });
-      message.success("Bark 配置已保存");
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "保存 Bark 配置失败");
-    } finally {
-      setBarkSaving(false);
-    }
-  }
-
-  async function runBarkTest() {
-    const values = await barkForm.validateFields();
-    setBarkTesting(true);
-    try {
-      await updateBarkConfig({
-        enabled: values.enabled,
-        server_url: values.server_url,
-        device_key: values.device_key,
-        sound: values.sound || null,
-        group: values.group || null,
-        icon: values.icon || null
-      });
-      const result = await testBark({
-        title: values.test_title,
-        body: values.test_body
-      });
-      if (result.ok) {
-        message.success(result.message);
-      } else {
-        message.error(result.message);
-      }
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "Bark 测试发送失败");
-    } finally {
-      setBarkTesting(false);
-    }
-  }
-
-  async function runToggleNotification(account: Account, enabled: boolean) {
-    try {
-      await updateAccountNotification(account.account_id, enabled);
-      setAccounts((items) =>
-        items.map((item) =>
-          item.account_id === account.account_id
-            ? { ...item, notification_enabled: enabled }
-            : item
-        )
-      );
-      message.success(enabled ? "已开启账户通知" : "已关闭账户通知");
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "更新账户通知失败");
-    }
-  }
-
   async function runToggleAccountAutoReply(account: Account, enabled: boolean) {
     setAccountAutoReplyUpdatingId(account.account_id);
     try {
@@ -5382,6 +5286,8 @@ export default function App() {
       setChatwootConfig(result);
       chatwootForm.setFieldsValue({
         enabled: result.enabled,
+        account_alerts_enabled: result.account_alerts_enabled,
+        offline_alert_delay_seconds: result.offline_alert_delay_seconds,
         base_url: result.base_url,
         inbox_identifier: result.inbox_identifier,
         callback_url: result.callback_url,
@@ -5412,6 +5318,8 @@ export default function App() {
       setChatwootConfig(saved);
       chatwootForm.setFieldsValue({
         enabled: saved.enabled,
+        account_alerts_enabled: saved.account_alerts_enabled,
+        offline_alert_delay_seconds: saved.offline_alert_delay_seconds,
         base_url: saved.base_url,
         inbox_identifier: saved.inbox_identifier,
         callback_url: saved.callback_url,
@@ -5441,6 +5349,22 @@ export default function App() {
       await loadChatwootData();
     } finally {
       setChatwootTesting(false);
+    }
+  }
+
+  async function runChatwootAccountAlertTest() {
+    setChatwootAlertTesting(true);
+    try {
+      const result = await testChatwootAccountAlerts();
+      message.success(result.message);
+      await loadChatwootData();
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "Chatwoot 账户提醒测试失败"
+      );
+      await loadChatwootData();
+    } finally {
+      setChatwootAlertTesting(false);
     }
   }
 
@@ -7579,7 +7503,7 @@ export default function App() {
       },
       {
         title: "账户",
-        dataIndex: "account_name",
+        dataIndex: "display_name",
         width: showAccountProxy ? accountColumnWidth : undefined,
         minWidth: ACCOUNT_TABLE_COLUMN_WIDTHS.account,
         render: (_, account) => {
@@ -7589,8 +7513,6 @@ export default function App() {
           );
           const avatarFallback = (
             account.platform_display_name ||
-            account.remark ||
-            account.account_name ||
             account.platform ||
             "闲"
           ).trim().slice(0, 1);
@@ -7818,14 +7740,6 @@ export default function App() {
                 checkedChildren="回复"
                 unCheckedChildren="回复"
                 onChange={(checked) => void runToggleAccountAutoReply(account, checked)}
-              />
-              <Switch
-                size="small"
-                disabled={!canMutate}
-                checked={account.notification_enabled}
-                checkedChildren="通知"
-                unCheckedChildren="通知"
-                onChange={(checked) => void runToggleNotification(account, checked)}
               />
               <Tooltip title="仅控制商品管理页面展示，不影响账户连接或同步设置">
                 <Switch
@@ -8064,8 +7978,8 @@ export default function App() {
                 ).length
               }
             </Descriptions.Item>
-            <Descriptions.Item label="通知开启">
-              {accounts.filter((item) => item.notification_enabled).length}
+            <Descriptions.Item label="Chat 开启">
+              {accounts.filter((item) => item.chat_enabled).length}
             </Descriptions.Item>
             <Descriptions.Item label="智能回复">
               {accounts.filter((item) => item.auto_reply_enabled).length}
@@ -9144,73 +9058,6 @@ export default function App() {
               }
             ]}
           />
-      </Card>
-    );
-  }
-
-  function renderNotificationsPage() {
-    return (
-      <Card
-        title={
-          <Space>
-            <BellOutlined />
-            Bark 通知
-          </Space>
-        }
-        extra={
-          <Space>
-            <Button loading={barkSaving} onClick={() => void saveBarkConfig()}>
-              保存配置
-            </Button>
-            <Button type="primary" loading={barkTesting} onClick={() => void runBarkTest()}>
-              测试发送
-            </Button>
-          </Space>
-        }
-      >
-        <Form
-          form={barkForm}
-          layout="vertical"
-          initialValues={{
-            enabled: false,
-            server_url: "https://api.day.app",
-            device_key: "",
-            group: "多平台管理",
-            test_title: "多平台管理测试通知",
-            test_body: "Bark 通知配置可用。"
-          }}
-        >
-          <div className="bark-form-grid">
-            <Form.Item name="enabled" label="启用 Bark" valuePropName="checked">
-              <Switch />
-            </Form.Item>
-            <Form.Item
-              name="server_url"
-              label="Bark Server"
-              rules={[{ required: true, message: "请输入 Bark Server" }]}
-            >
-              <Input placeholder="https://api.day.app" />
-            </Form.Item>
-            <Form.Item name="device_key" label="Device Key">
-              <Input.Password placeholder="Bark App 中的 Key" />
-            </Form.Item>
-            <Form.Item name="group" label="分组">
-              <Input placeholder="多平台管理" />
-            </Form.Item>
-            <Form.Item name="sound" label="提示音">
-              <Input placeholder="可选，例如 bell" />
-            </Form.Item>
-            <Form.Item name="icon" label="图标 URL">
-              <Input placeholder="可选" />
-            </Form.Item>
-            <Form.Item name="test_title" label="测试标题">
-              <Input />
-            </Form.Item>
-            <Form.Item name="test_body" label="测试内容">
-              <Input />
-            </Form.Item>
-          </div>
-        </Form>
       </Card>
     );
   }
@@ -13050,6 +12897,8 @@ export default function App() {
             className="chatwoot-config-form"
             initialValues={{
               enabled: false,
+              account_alerts_enabled: true,
+              offline_alert_delay_seconds: 120,
               clear_client_hmac_token: false,
               clear_api_access_token: false
             }}
@@ -13061,6 +12910,28 @@ export default function App() {
                 valuePropName="checked"
               >
                 <Switch checkedChildren="已启用" unCheckedChildren="已停用" />
+              </Form.Item>
+              <Form.Item
+                name="account_alerts_enabled"
+                label="账户状态提醒"
+                valuePropName="checked"
+                extra="平台级统一配置；Cookie 确认失效、IM 持续掉线及恢复会作为 Chatwoot 入站事件推送"
+              >
+                <Switch checkedChildren="已启用" unCheckedChildren="已停用" />
+              </Form.Item>
+              <Form.Item
+                name="offline_alert_delay_seconds"
+                label="IM 掉线提醒延迟"
+                extra="短时网络抖动不会立即通知；Cookie 确认失效不受此延迟影响"
+                rules={[{ required: true, message: "请输入掉线提醒延迟" }]}
+              >
+                <InputNumber
+                  min={30}
+                  max={3600}
+                  precision={0}
+                  addonAfter="秒"
+                  style={{ width: "100%" }}
+                />
               </Form.Item>
               <Form.Item label="当前链路">
                 <Space size={6} wrap className="chatwoot-config-status">
@@ -13183,6 +13054,16 @@ export default function App() {
               >
                 测试连接
               </Button>
+              <Button
+                loading={chatwootAlertTesting}
+                disabled={
+                  !chatwootConfig?.enabled ||
+                  !chatwootConfig?.account_alerts_enabled
+                }
+                onClick={() => void runChatwootAccountAlertTest()}
+              >
+                测试账户提醒
+              </Button>
             </div>
           </Form>
         </Card>
@@ -13194,7 +13075,6 @@ export default function App() {
             description={chatwootConfig.last_error}
           />
         ) : null}
-        {renderNotificationsPage()}
       </Space>
     );
   }
@@ -13698,7 +13578,6 @@ export default function App() {
             <Route path="/products" element={<Navigate to="/product-management" replace />} />
             <Route path="/events" element={<Navigate to="/accounts" replace />} />
             <Route path="/tasks" element={<Navigate to="/settings?tab=tasks" replace />} />
-            <Route path="/notifications" element={<Navigate to="/settings?tab=message-services" replace />} />
             <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
             <Route path="/settings" element={renderSettingsPage()} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

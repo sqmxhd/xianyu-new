@@ -238,9 +238,7 @@ class CookieRenewalPersistenceTests(unittest.IsolatedAsyncioTestCase):
         factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
         self.store = AccountStore(session_factory=factory, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="seller",
-                cookie="unb=seller-1; _m_h5_tk=old-token",
+            AccountCreatePayload(cookie="unb=seller-1; _m_h5_tk=old-token",
                 enabled=True,
             )
         )

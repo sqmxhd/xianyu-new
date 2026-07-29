@@ -19,7 +19,7 @@ import re
 import socket
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -67,6 +67,10 @@ CHATWOOT_LOCAL_MESSAGE_TASK = "chatwoot.sync_local_message"
 CHATWOOT_WEBHOOK_TASK = "chatwoot.process_webhook"
 CHATWOOT_ACCOUNT_STATUS_TASK = "chatwoot.sync_account_status"
 CHATWOOT_ACCOUNT_METADATA_TASK = "chatwoot.sync_account_metadata"
+CHATWOOT_ACCOUNT_ALERT_TASK = "chatwoot.send_account_alert"
+CHATWOOT_ACCOUNT_ALERT_STATES = frozenset(
+    {"offline", "auth_expired", "risk_blocked", "proxy_failed", "error"}
+)
 DEFAULT_PLATFORM = "xianyu"
 PLATFORM_DISPLAY_NAMES = {
     "xianyu": "闲鱼",
@@ -79,6 +83,7 @@ MAX_AUDIO_REDIRECTS = 3
 XIANYU_AUDIO_HOST_SUFFIXES = (".aliyuncs.com",)
 CHATWOOT_CONFIG_ID = "default"
 CHATWOOT_CALLBACK_PATH = "/api/integrations/chatwoot/webhook"
+SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 CHATWOOT_OUTBOUND_AUDIO_UNSUPPORTED_MESSAGE = (
     "当前闲鱼通道仅支持从 Chatwoot 发送文字和图片；"
     "语音仅支持接收和播放，本条未发送"
@@ -1047,6 +1052,34 @@ class ChatwootRepository:
             label_title,
         )
 
+    async def update_account_alert_channel(
+        self,
+        *,
+        account_id: str,
+        source_id: str,
+        contact_id: str,
+        conversation_id: str,
+    ) -> None:
+        await run_db_blocking(
+            self._update_account_alert_channel_sync,
+            account_id,
+            source_id,
+            contact_id,
+            conversation_id,
+        )
+
+    async def record_account_alert_state(
+        self,
+        *,
+        account_id: str,
+        state: str,
+    ) -> None:
+        await run_db_blocking(
+            self._record_account_alert_state_sync,
+            account_id,
+            state,
+        )
+
     async def get_account_identity(
         self,
         account_id: str,
@@ -1307,6 +1340,8 @@ class ChatwootRepository:
         return ChatwootConfigPayload(
             config_id=row.config_id,
             enabled=row.enabled,
+            account_alerts_enabled=row.account_alerts_enabled,
+            offline_alert_delay_seconds=row.offline_alert_delay_seconds,
             base_url=row.base_url,
             inbox_identifier=row.inbox_identifier,
             chatwoot_inbox_id=row.chatwoot_inbox_id,
@@ -1397,6 +1432,11 @@ class ChatwootRepository:
             "webhook_secret": decrypt_sensitive(row.webhook_secret_encrypted),
             "label_id": row.label_id,
             "label_title": row.label_title,
+            "alert_source_id": row.alert_source_id,
+            "alert_contact_id": row.alert_contact_id,
+            "alert_conversation_id": row.alert_conversation_id,
+            "last_alert_state": row.last_alert_state,
+            "last_alert_at": row.last_alert_at,
             "status": row.status,
             "last_error": row.last_error,
         }
@@ -1456,6 +1496,37 @@ class ChatwootRepository:
             row.updated_at = utcnow()
             session.commit()
 
+    def _update_account_alert_channel_sync(
+        self,
+        account_id: str,
+        source_id: str,
+        contact_id: str,
+        conversation_id: str,
+    ) -> None:
+        with self._session_factory() as session:
+            row = session.get(ChatwootInboxBindingORM, account_id)
+            if row is None:
+                raise ChatwootIntegrationError("账号 Chatwoot Inbox 尚未创建")
+            row.alert_source_id = source_id[:160]
+            row.alert_contact_id = contact_id[:128]
+            row.alert_conversation_id = conversation_id[:128]
+            row.updated_at = utcnow()
+            session.commit()
+
+    def _record_account_alert_state_sync(
+        self,
+        account_id: str,
+        state: str,
+    ) -> None:
+        with self._session_factory() as session:
+            row = session.get(ChatwootInboxBindingORM, account_id)
+            if row is None:
+                raise ChatwootIntegrationError("账号 Chatwoot Inbox 尚未创建")
+            row.last_alert_state = state[:32]
+            row.last_alert_at = utcnow()
+            row.updated_at = row.last_alert_at
+            session.commit()
+
     def _get_account_identity_sync(
         self,
         account_id: str,
@@ -1466,7 +1537,7 @@ class ChatwootRepository:
                 return None
             return {
                 "account_id": row.account_id,
-                "account_name": row.account_name,
+                "account_name": row.display_name,
                 "platform": row.platform or DEFAULT_PLATFORM,
             }
 
@@ -1495,8 +1566,12 @@ class ChatwootRepository:
                     )
                 ),
                 "platform_enabled": bool(row.enabled),
+                "account_alerts_enabled": bool(row.account_alerts_enabled),
+                "offline_alert_delay_seconds": max(
+                    30, min(int(row.offline_alert_delay_seconds or 120), 3600)
+                ),
                 "account_chat_enabled": bool(account.chat_enabled) if account else None,
-                "account_name": account.account_name if account else None,
+                "account_name": account.display_name if account else None,
                 "platform": (
                     account.platform if account and account.platform else DEFAULT_PLATFORM
                 ),
@@ -1533,6 +1608,13 @@ class ChatwootRepository:
                 "managed_inbox": binding is not None,
                 "label_id": binding.label_id if binding else None,
                 "label_title": binding.label_title if binding else None,
+                "alert_source_id": binding.alert_source_id if binding else None,
+                "alert_contact_id": binding.alert_contact_id if binding else None,
+                "alert_conversation_id": (
+                    binding.alert_conversation_id if binding else None
+                ),
+                "last_alert_state": binding.last_alert_state if binding else None,
+                "last_alert_at": binding.last_alert_at if binding else None,
             }
 
     def _upsert_config_sync(
@@ -1558,6 +1640,8 @@ class ChatwootRepository:
                 session.execute(sql_delete(ChatwootContactORM))
                 row.chatwoot_inbox_id = None
             row.enabled = payload.enabled
+            row.account_alerts_enabled = payload.account_alerts_enabled
+            row.offline_alert_delay_seconds = payload.offline_alert_delay_seconds
             row.base_url = payload.base_url
             row.inbox_identifier = payload.inbox_identifier
             row.callback_url = payload.callback_url or _chatwoot_callback_url()
@@ -1686,7 +1770,7 @@ class ChatwootRepository:
                 "peer_user_id": conversation.peer_user_id,
                 "peer_name": conversation.peer_name or conversation.peer_user_id,
                 "account_name": (
-                    account.account_name if account else account_id[:8]
+                    account.display_name if account else account_id[:8]
                 ),
                 "platform": (
                     account.platform if account and account.platform else DEFAULT_PLATFORM
@@ -1702,6 +1786,8 @@ class ChatwootRepository:
                 "content": message.content,
                 "send_status": message.send_status,
                 "recalled": message.recalled_at is not None,
+                "created_at_ms": message.created_at_ms,
+                "created_at": message.created_at.isoformat(),
                 "raw_payload": raw_payload,
                 "attachments": [
                     {
@@ -1741,7 +1827,7 @@ class ChatwootRepository:
                 "peer_user_id": conversation.peer_user_id,
                 "peer_name": conversation.peer_name or conversation.peer_user_id,
                 "account_name": (
-                    account.account_name if account else account_id[:8]
+                    account.display_name if account else account_id[:8]
                 ),
                 "platform": (
                     account.platform if account and account.platform else DEFAULT_PLATFORM
@@ -2341,6 +2427,74 @@ async def enqueue_account_status_sync(
             payload={"state": state, "message": message},
         )
     )
+    if task is not None and task.status == "pending":
+        try:
+            result = await enqueue_background_task(store, task)
+            if result.queued:
+                await store.mark_background_task_queued(task.task_id)
+        except Exception:
+            logger.warning(
+                "Chatwoot account state task persisted but enqueue failed",
+                exc_info=True,
+            )
+    await enqueue_account_alert_sync(
+        store,
+        account_id=account_id,
+        state=state,
+        message=message,
+    )
+
+
+async def enqueue_account_alert_sync(
+    store: AccountStore,
+    *,
+    account_id: str,
+    state: str,
+    message: str | None,
+) -> None:
+    if state not in CHATWOOT_ACCOUNT_ALERT_STATES and state != "online":
+        return
+    session_factory = getattr(store, "session_factory", None)
+    if session_factory is None:
+        return
+    repository = ChatwootRepository(session_factory)
+    try:
+        config = await repository.get_config(account_id=account_id)
+    except Exception:
+        logger.debug(
+            "Chatwoot account alert skipped because integration storage is unavailable",
+            exc_info=True,
+        )
+        return
+    if (
+        config is None
+        or not config["enabled"]
+        or not config.get("account_alerts_enabled")
+    ):
+        return
+    delay_seconds = (
+        int(config.get("offline_alert_delay_seconds") or 120)
+        if state == "offline"
+        else 0
+    )
+    bucket = int(time.time() // 30)
+    task = await store.create_background_task(
+        BackgroundTaskCreatePayload(
+            account_id=account_id,
+            task_type=CHATWOOT_ACCOUNT_ALERT_TASK,
+            dedupe_key=f"chatwoot-account-alert:{account_id}:{state}:{bucket}",
+            run_after=(
+                datetime.now(UTC) + timedelta(seconds=delay_seconds)
+                if delay_seconds
+                else None
+            ),
+            payload={
+                "state": state,
+                "message": message,
+                "expected_state": state,
+            },
+        )
+    )
     if task is None or task.status != "pending":
         return
     try:
@@ -2348,7 +2502,10 @@ async def enqueue_account_status_sync(
         if result.queued:
             await store.mark_background_task_queued(task.task_id)
     except Exception:
-        logger.warning("Chatwoot account state task persisted but enqueue failed", exc_info=True)
+        logger.warning(
+            "Chatwoot account alert task persisted but enqueue failed",
+            exc_info=True,
+        )
 
 
 async def enqueue_account_metadata_sync(
@@ -2412,6 +2569,7 @@ def _chatwoot_request(
     url: str,
     *,
     token: str | None = None,
+    params: dict[str, str] | None = None,
     json_body: dict[str, Any] | None = None,
     data: dict[str, str] | None = None,
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
@@ -2422,13 +2580,14 @@ def _chatwoot_request(
     # containing underscores unless `underscores_in_headers on` is configured.
     # Rack normalizes the hyphenated form to the same header and Chatwoot accepts
     # it, so this works with both direct Rails and default Nginx deployments.
-    headers = {"api-access-token": token} if token else {}
+    request_headers = {"api-access-token": token} if token else {}
     with requests.Session() as client:
         client.trust_env = False
         response = client.request(
             method,
             url,
-            headers=headers,
+            headers=request_headers,
+            params=params,
             json=json_body if files is None else None,
             data=data,
             files=files,
@@ -2452,6 +2611,46 @@ def _chatwoot_request(
             status_code=response.status_code,
         )
     return response.status_code, body
+
+
+def _chatwoot_message_list(payload: object) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    body = _json_object(payload)
+    items = body.get("payload")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        return [item for item in messages if isinstance(item, dict)]
+    return []
+
+
+async def _list_chatwoot_messages(
+    config: dict[str, Any],
+    *,
+    chatwoot_conversation_id: str,
+    before: str | None = None,
+) -> list[dict[str, Any]]:
+    token = _string(config.get("api_access_token"))
+    chatwoot_account_id = config.get("chatwoot_account_id")
+    if not token or not chatwoot_account_id:
+        raise ChatwootIntegrationError(
+            "读取 Chatwoot 消息需要服务账号令牌与平台账户 ID",
+            status_code=503,
+        )
+    _, body = await run_external_blocking(
+        _chatwoot_request,
+        "GET",
+        (
+            f"{config['base_url']}/api/v1/accounts/{chatwoot_account_id}"
+            f"/conversations/{chatwoot_conversation_id}/messages"
+        ),
+        token=token,
+        params={"before": before} if before else None,
+        timeout=10,
+    )
+    return _chatwoot_message_list(body)
 
 
 async def test_chatwoot_config(
@@ -3224,6 +3423,7 @@ async def _create_private_delivery_note(
     *,
     chatwoot_conversation_id: str,
     content: str,
+    content_attributes: dict[str, Any] | None = None,
 ) -> bool:
     if not config.get("api_access_token") or not config.get("chatwoot_account_id"):
         return False
@@ -3231,16 +3431,173 @@ async def _create_private_delivery_note(
         f"{config['base_url']}/api/v1/accounts/{config['chatwoot_account_id']}"
         f"/conversations/{chatwoot_conversation_id}/messages"
     )
+    body: dict[str, Any] = {
+        "content": content,
+        "message_type": "outgoing",
+        "private": True,
+    }
+    if content_attributes:
+        body["content_attributes"] = content_attributes
     await run_external_blocking(
         _chatwoot_request,
         "POST",
         message_url,
         token=config["api_access_token"],
-        json_body={
-            "content": content,
-            "message_type": "outgoing",
-            "private": True,
-        },
+        json_body=body,
+    )
+    return True
+
+
+def _recall_snapshot_payload(
+    contexts: list[dict[str, Any]],
+    *,
+    succeeded: bool,
+    error: str | None,
+) -> tuple[str, list[str]]:
+    ordered = sorted(
+        contexts,
+        key=lambda item: (
+            int(item.get("created_at_ms") or 0),
+            _string(item.get("message_pk")),
+        ),
+    )
+    image_urls: list[str] = []
+    contents: list[str] = []
+    for context in ordered:
+        context_images = _context_image_urls(context)
+        for image_url in context_images:
+            if image_url not in image_urls:
+                image_urls.append(image_url)
+        raw_content = _string(context.get("content")).strip()
+        if raw_content:
+            visible_lines = [
+                line
+                for line in raw_content.splitlines()
+                if line.strip() and line.strip() not in context_images
+            ]
+            visible_content = "\n".join(visible_lines).strip()
+            if visible_content and visible_content not in contents:
+                contents.append(visible_content)
+
+    created_at = next(
+        (
+            _string(context.get("created_at"))
+            for context in ordered
+            if _string(context.get("created_at"))
+        ),
+        "",
+    )
+    header = "原消息"
+    if created_at:
+        try:
+            original_time = datetime.fromisoformat(created_at)
+            if original_time.tzinfo is None:
+                original_time = original_time.replace(tzinfo=UTC)
+            header = (
+                "原消息（"
+                f"{original_time.astimezone(SHANGHAI_TIMEZONE):%Y-%m-%d %H:%M:%S}"
+                " 上海时间）"
+            )
+        except ValueError:
+            pass
+
+    if contents:
+        original_content = "\n".join(contents)
+    elif image_urls:
+        original_content = "[图片]"
+    else:
+        original_content = "[原消息内容未能从本地记录恢复]"
+    status = (
+        "↩ 闲鱼消息已撤回"
+        if succeeded
+        else f"⚠️ 闲鱼消息撤回失败：{error or '闲鱼平台未确认撤回'}"
+    )
+    return f"{header}：\n{original_content}\n\n{status}", image_urls
+
+
+async def _chatwoot_recall_snapshot_exists(
+    config: dict[str, Any],
+    *,
+    chatwoot_conversation_id: str,
+    chatwoot_message_id: str,
+) -> bool:
+    messages = await _list_chatwoot_messages(
+        config,
+        chatwoot_conversation_id=chatwoot_conversation_id,
+    )
+    return any(
+        _message_is_private(message)
+        and _remote_id(
+            _json_object(message.get("content_attributes")).get(
+                "xianyu_deleted_source_message_id"
+            )
+        )
+        == chatwoot_message_id
+        for message in messages
+    )
+
+
+async def _create_private_recall_snapshot(
+    config: dict[str, Any],
+    *,
+    chatwoot_conversation_id: str,
+    chatwoot_message_id: str,
+    contexts: list[dict[str, Any]],
+    succeeded: bool,
+    error: str | None,
+) -> bool:
+    if not config.get("api_access_token") or not config.get("chatwoot_account_id"):
+        raise ChatwootIntegrationError(
+            "恢复已删除原消息需要 Chatwoot 服务账号令牌与平台账户 ID"
+        )
+    content, image_urls = _recall_snapshot_payload(
+        contexts,
+        succeeded=succeeded,
+        error=error,
+    )
+    attributes = {
+        "xianyu_deleted_source_message_id": chatwoot_message_id,
+        "xianyu_recall_snapshot": True,
+        "xianyu_recall_state": "recalled" if succeeded else "failed",
+    }
+    if not image_urls:
+        return await _create_private_delivery_note(
+            config,
+            chatwoot_conversation_id=chatwoot_conversation_id,
+            content=content,
+            content_attributes=attributes,
+        )
+
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for image_url in image_urls:
+        data, mime_type, filename = await run_external_blocking(
+            _download_image,
+            image_url,
+        )
+        files.append(("attachments[]", (filename, data, mime_type)))
+    message_url = (
+        f"{config['base_url']}/api/v1/accounts/{config['chatwoot_account_id']}"
+        f"/conversations/{chatwoot_conversation_id}/messages"
+    )
+    form_data = {
+        "content": content,
+        "message_type": "outgoing",
+        "private": "true",
+        "content_attributes[xianyu_deleted_source_message_id]": (
+            chatwoot_message_id
+        ),
+        "content_attributes[xianyu_recall_snapshot]": "true",
+        "content_attributes[xianyu_recall_state]": (
+            "recalled" if succeeded else "failed"
+        ),
+    }
+    await run_external_blocking(
+        _chatwoot_request,
+        "POST",
+        message_url,
+        token=config["api_access_token"],
+        data=form_data,
+        files=files,
     )
     return True
 
@@ -3719,11 +4076,21 @@ async def execute_webhook_task(
                 else:
                     recall_results: list[dict[str, Any]] = []
                     status_config: dict[str, Any] | None = None
-                    newly_processed = False
+                    snapshot_contexts: list[dict[str, Any]] = []
+                    snapshot_required = False
                     for item in mapped_messages:
                         account_id = _string(item.get("account_id"))
                         message_pk = _string(item.get("message_pk"))
                         item_state = _string(item.get("state"))
+                        context = await repository.get_local_message_context(
+                            account_id,
+                            message_pk,
+                        )
+                        if context is not None:
+                            snapshot_contexts.append(context)
+                        config = await repository.get_config(account_id=account_id)
+                        if status_config is None and config is not None:
+                            status_config = config
                         if item_state == "recalled":
                             recall_results.append(
                                 {
@@ -3744,49 +4111,70 @@ async def execute_webhook_task(
                                 }
                             )
                             continue
-                        config = await repository.get_config(account_id=account_id)
-                        if config is None or not config["enabled"]:
+                        if item_state in {
+                            "recall_snapshot_pending",
+                            "gateway_recalled_note_pending",
+                        }:
+                            snapshot_required = True
+                            recall_results.append(
+                                {
+                                    "success": True,
+                                    "message_pk": message_pk,
+                                    "snapshot_pending": True,
+                                }
+                            )
+                            continue
+                        if item_state == "recall_failed_snapshot_pending":
+                            snapshot_required = True
                             recall_results.append(
                                 {
                                     "success": False,
                                     "message_pk": message_pk,
-                                    "error": "该闲鱼账户的 Chat 同步已关闭",
+                                    "snapshot_pending": True,
+                                    "error": _string(item.get("error"))
+                                    or "闲鱼平台未确认撤回",
                                 }
                             )
                             continue
-                        if status_config is None:
-                            status_config = config
-                        newly_processed = True
-                        conversation_map = (
-                            await repository.get_conversation_map_by_remote(
-                                account_id,
-                                _string(item.get("chatwoot_conversation_id")),
-                            )
-                        )
-                        conversation_id = _string(
-                            (conversation_map or {}).get("conversation_id")
-                        )
-                        if not conversation_id:
+                        snapshot_required = True
+                        if config is None or not config["enabled"]:
                             recall_result = {
                                 "success": False,
-                                "error": "没有找到对应的闲鱼会话映射",
+                                "error": "该闲鱼账户的 Chat 同步已关闭",
                             }
                         else:
-                            try:
-                                recall_result = await runtime_command(
-                                    "recall",
+                            conversation_map = (
+                                await repository.get_conversation_map_by_remote(
                                     account_id,
-                                    {
-                                        "conversation_id": conversation_id,
-                                        "message_pk": message_pk,
-                                    },
+                                    _string(item.get("chatwoot_conversation_id")),
                                 )
-                            except Exception as exc:
+                            )
+                            conversation_id = _string(
+                                (conversation_map or {}).get("conversation_id")
+                            )
+                            if not conversation_id:
                                 recall_result = {
                                     "success": False,
-                                    "error": str(exc)[:1000],
+                                    "error": "没有找到对应的闲鱼会话映射",
                                 }
+                            else:
+                                try:
+                                    recall_result = await runtime_command(
+                                        "recall",
+                                        account_id,
+                                        {
+                                            "conversation_id": conversation_id,
+                                            "message_pk": message_pk,
+                                        },
+                                    )
+                                except Exception as exc:
+                                    recall_result = {
+                                        "success": False,
+                                        "error": str(exc)[:1000],
+                                    }
                         recall_result = _json_object(recall_result)
+                        recall_result["message_pk"] = message_pk
+                        recall_result["snapshot_pending"] = True
                         recall_results.append(recall_result)
                         success = bool(recall_result.get("success"))
                         await repository.record_message_map(
@@ -3797,7 +4185,11 @@ async def execute_webhook_task(
                                 item.get("chatwoot_conversation_id")
                             ),
                             origin=_string(item.get("origin")) or "chatwoot",
-                            state="recalled" if success else "recall_failed",
+                            state=(
+                                "recall_snapshot_pending"
+                                if success
+                                else "recall_failed_snapshot_pending"
+                            ),
                             error=(
                                 None
                                 if success
@@ -3815,34 +4207,67 @@ async def execute_webhook_task(
                             for item in recall_results
                             if not item.get("success")
                         )[:1000]
-                    if (
-                        newly_processed
-                        and status_config is not None
-                        and remote_conversation_id
-                    ):
-                        note = (
-                            "↩ 闲鱼消息已撤回（Chatwoot 原消息已删除）"
-                            if succeeded
-                            else (
-                                f"⚠️ 闲鱼消息撤回失败：{error}。"
-                                "Chatwoot 原消息已删除，请到闲鱼确认消息状态。"
+                    snapshot_created = False
+                    if snapshot_required:
+                        if status_config is None:
+                            status_config = platform_config
+                        if not remote_conversation_id:
+                            raise ChatwootIntegrationError(
+                                "Chatwoot 删除事件缺少会话 ID，无法恢复原消息快照"
                             )
-                        )
-                        try:
-                            await _create_private_delivery_note(
+                        snapshot_exists = (
+                            await _chatwoot_recall_snapshot_exists(
                                 status_config,
                                 chatwoot_conversation_id=remote_conversation_id,
-                                content=note,
+                                chatwoot_message_id=remote_message_id,
                             )
-                        except Exception:
-                            logger.warning(
-                                "Failed to create Chatwoot recall result note",
-                                exc_info=True,
+                        )
+                        if not snapshot_exists:
+                            await _create_private_recall_snapshot(
+                                status_config,
+                                chatwoot_conversation_id=remote_conversation_id,
+                                chatwoot_message_id=remote_message_id,
+                                contexts=snapshot_contexts,
+                                succeeded=succeeded,
+                                error=error,
+                            )
+                            snapshot_created = True
+                        outcomes = {
+                            _string(item.get("message_pk")): item
+                            for item in recall_results
+                        }
+                        for item in mapped_messages:
+                            outcome = outcomes.get(
+                                _string(item.get("message_pk"))
+                            )
+                            if not outcome or not outcome.get("snapshot_pending"):
+                                continue
+                            item_success = bool(outcome.get("success"))
+                            await repository.record_message_map(
+                                account_id=_string(item.get("account_id")),
+                                message_pk=_remote_id(item.get("message_pk")),
+                                chatwoot_message_id=remote_message_id,
+                                chatwoot_conversation_id=_remote_id(
+                                    item.get("chatwoot_conversation_id")
+                                ),
+                                origin=_string(item.get("origin")) or "chatwoot",
+                                state=(
+                                    "recalled"
+                                    if item_success
+                                    else "recall_failed"
+                                ),
+                                error=(
+                                    None
+                                    if item_success
+                                    else _string(outcome.get("error"))
+                                    or "闲鱼平台未确认撤回"
+                                ),
                             )
                     result = {
                         "ok": succeeded,
                         "remote_deleted": len(mapped_messages),
                         "platform_recall": True,
+                        "private_snapshot_created": snapshot_created,
                         "recalled_messages": sum(
                             1 for item in recall_results if item.get("success")
                         ),
@@ -4239,6 +4664,260 @@ async def execute_account_status_task(
         "updated_conversations": updated_conversations,
         "migrated_conversations": migrated_conversations,
         "stale_conversations": stale_conversations,
+    }
+
+
+def _account_alert_source_id(account_id: str) -> str:
+    digest = hashlib.sha256(f"account-alert:{account_id}".encode("utf-8")).hexdigest()
+    return f"xy_account_alert_{digest[:32]}"
+
+
+def _account_alert_content(
+    config: dict[str, Any],
+    *,
+    state: str,
+    message: str | None,
+) -> str:
+    event_labels = {
+        "offline": "IM 连接持续掉线",
+        "auth_expired": "Web Cookie 已确认失效",
+        "risk_blocked": "账户触发风险控制",
+        "proxy_failed": "账户代理连接异常",
+        "error": "账户运行异常",
+        "online": "账户已恢复在线",
+        "test": "账户状态提醒测试",
+    }
+    icon = "✅" if state == "online" else "🧪" if state == "test" else "⚠️"
+    detail = _string(message) or (
+        "Chatwoot 账户状态提醒链路工作正常"
+        if state == "test"
+        else "请在平台账户页面检查当前连接状态"
+    )
+    occurred_at = datetime.now(SHANGHAI_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    return "\n".join(
+        [
+            f"{icon} {event_labels.get(state, '账户状态变化')}",
+            f"平台：{config.get('platform_name') or _platform_name(config.get('platform'))}",
+            f"账户：{config.get('account_name') or config.get('account_id')}",
+            f"说明：{detail}",
+            f"时间：{occurred_at} 上海时间",
+        ]
+    )
+
+
+async def _ensure_account_alert_conversation(
+    repository: ChatwootRepository,
+    config: dict[str, Any],
+) -> tuple[str, str]:
+    config = await _ensure_managed_account_inbox(
+        repository,
+        config,
+        refresh_display_name=True,
+    )
+    source_id = _string(config.get("alert_source_id")) or _account_alert_source_id(
+        config["account_id"]
+    )
+    contact_name = (
+        f"账户状态｜{config.get('platform_name') or _platform_name(config.get('platform'))}"
+        f"｜{config.get('account_name') or config['account_id'][:8]}"
+    )
+    contact_url = (
+        f"{config['base_url']}/public/api/v1/inboxes/"
+        f"{config['inbox_identifier']}/contacts"
+    )
+    status_code, created_body = await run_external_blocking(
+        _chatwoot_request,
+        "POST",
+        contact_url,
+        json_body={
+            "source_id": source_id,
+            "name": contact_name,
+            "custom_attributes": {
+                "source_platform": config.get("platform") or DEFAULT_PLATFORM,
+                "source_account_id": config["account_id"],
+                "source_account_name": config.get("account_name"),
+                "xianyu_event_channel": "account_status",
+            },
+        },
+        acceptable={409, 422},
+    )
+    created = _json_object(created_body)
+    created_contact = _json_object(created.get("contact"))
+    contact_id = _remote_id(created.get("id") or created_contact.get("id"))
+    await run_external_blocking(
+        _chatwoot_request,
+        "PATCH",
+        f"{contact_url}/{source_id}",
+        json_body={
+            "name": contact_name,
+            "custom_attributes": {
+                "source_platform": config.get("platform") or DEFAULT_PLATFORM,
+                "source_account_id": config["account_id"],
+                "source_account_name": config.get("account_name"),
+                "xianyu_event_channel": "account_status",
+            },
+        },
+    )
+    if contact_id is None or status_code >= 400:
+        _, contact_body = await run_external_blocking(
+            _chatwoot_request,
+            "GET",
+            f"{contact_url}/{source_id}",
+        )
+        contact_payload = _json_object(contact_body)
+        nested_contact = _json_object(contact_payload.get("contact"))
+        contact_id = _remote_id(
+            contact_payload.get("id") or nested_contact.get("id")
+        )
+    if contact_id is None:
+        raise ChatwootIntegrationError("Chatwoot 账户提醒联系人未返回联系人 ID")
+
+    conversation_id = _remote_id(config.get("alert_conversation_id"))
+    if conversation_id:
+        status_code, _ = await run_external_blocking(
+            _chatwoot_request,
+            "GET",
+            (
+                f"{config['base_url']}/api/v1/accounts/"
+                f"{config['chatwoot_account_id']}/conversations/{conversation_id}"
+            ),
+            token=config["api_access_token"],
+            acceptable={404},
+        )
+        if status_code == 404:
+            conversation_id = None
+    attributes = _conversation_source_attributes(
+        config,
+        conversation_id=f"account-alert:{config['account_id']}",
+        peer_user_id="system:account-status",
+        state=_string(config.get("account_state")) or None,
+        status_message=_string(config.get("account_status_message")) or None,
+    )
+    attributes["xianyu_event_channel"] = "account_status"
+    if conversation_id is None:
+        _, conversation_body = await run_external_blocking(
+            _chatwoot_request,
+            "POST",
+            (
+                f"{config['base_url']}/api/v1/accounts/"
+                f"{config['chatwoot_account_id']}/conversations"
+            ),
+            token=config["api_access_token"],
+            json_body={
+                "source_id": source_id,
+                "inbox_id": config["chatwoot_inbox_id"],
+                "contact_id": int(contact_id),
+                "status": "open",
+                "assignee_id": config.get("default_assignee_id"),
+                "custom_attributes": attributes,
+            },
+        )
+        conversation_id = _remote_id(
+            conversation_body.get("id") or conversation_body.get("display_id")
+        )
+    if conversation_id is None:
+        raise ChatwootIntegrationError("Chatwoot 账户提醒会话未返回会话 ID")
+    await repository.update_account_alert_channel(
+        account_id=config["account_id"],
+        source_id=source_id,
+        contact_id=contact_id,
+        conversation_id=conversation_id,
+    )
+    return source_id, conversation_id
+
+
+async def execute_account_alert_task(
+    store: AccountStore,
+    *,
+    account_id: str,
+    state: str,
+    message: str | None,
+    expected_state: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    repository = ChatwootRepository(store.session_factory)
+    config = await repository.get_config(account_id=account_id)
+    if (
+        config is None
+        or not config["enabled"]
+        or not config.get("account_alerts_enabled")
+    ):
+        return {"ok": True, "skipped": True, "reason": "account alerts disabled"}
+    current_state = _string(config.get("account_state"))
+    if not force and expected_state and current_state != expected_state:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "account state changed before alert delay elapsed",
+            "current_state": current_state,
+        }
+    previous_state = _string(config.get("last_alert_state"))
+    if not force:
+        if state == "online" and previous_state not in CHATWOOT_ACCOUNT_ALERT_STATES:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no prior failure alert requires recovery",
+            }
+        if state in CHATWOOT_ACCOUNT_ALERT_STATES and previous_state == state:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "alert state already delivered",
+            }
+    if not config.get("api_access_token") or not config.get("chatwoot_account_id"):
+        raise ChatwootIntegrationError(
+            "账户状态提醒需要 Chatwoot 平台账户 ID 与专用服务账号令牌"
+        )
+    source_id, conversation_id = await _ensure_account_alert_conversation(
+        repository,
+        config,
+    )
+    content = _account_alert_content(config, state=state, message=message)
+    await run_external_blocking(
+        _chatwoot_request,
+        "POST",
+        (
+            f"{config['base_url']}/api/v1/accounts/"
+            f"{config['chatwoot_account_id']}/conversations/"
+            f"{conversation_id}/toggle_status"
+        ),
+        token=config["api_access_token"],
+        json_body={"status": "open"},
+        acceptable={404},
+    )
+    _, body = await run_external_blocking(
+        _chatwoot_request,
+        "POST",
+        (
+            f"{config['base_url']}/public/api/v1/inboxes/"
+            f"{config['inbox_identifier']}/contacts/{source_id}/conversations/"
+            f"{conversation_id}/messages"
+        ),
+        json_body={
+            "content": content,
+            "echo_id": (
+                f"account-alert-{account_id}-{state}-"
+                f"{int(time.time() * 1000)}"
+            ),
+        },
+    )
+    if not force:
+        await repository.record_account_alert_state(
+            account_id=account_id,
+            state=state,
+        )
+    await repository.set_config_health(status="ready", error=None, pushed=True)
+    message_body = _json_object(body)
+    return {
+        "ok": True,
+        "state": state,
+        "previous_state": previous_state or None,
+        "chatwoot_conversation_id": conversation_id,
+        "chatwoot_message_id": _remote_id(
+            message_body.get("id")
+            or _json_object(message_body.get("message")).get("id")
+        ),
     }
 
 

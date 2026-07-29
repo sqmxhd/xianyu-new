@@ -110,7 +110,7 @@ class RuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def make_runtime(self) -> tuple[AccountRuntimeManager, _RuntimeStore, _RuntimeCore]:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=token",
         )
         store = _RuntimeStore(account)
@@ -413,7 +413,7 @@ class WorkerRuntimeOwnershipTests(unittest.IsolatedAsyncioTestCase):
         now = datetime.now(UTC)
         account = AccountRecord(
             account_id="account-delete",
-            account_name="delete-me",
+            platform_display_name="delete-me",
             cookie="unb=delete-me; _m_h5_tk=token",
         )
         task = BackgroundTaskPayload(
@@ -493,7 +493,7 @@ class WorkerRuntimeOwnershipTests(unittest.IsolatedAsyncioTestCase):
         now = datetime.now(UTC)
         account = AccountRecord(
             account_id="account-delivery",
-            account_name="delivery-account",
+            platform_display_name="delivery-account",
             cookie="unb=delivery; _m_h5_tk=token",
         )
         record = SimpleNamespace(record_id="record-idempotent", status="pending")

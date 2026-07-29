@@ -45,7 +45,7 @@ class BackgroundTaskClaimTests(unittest.IsolatedAsyncioTestCase):
             session_factory=self.session_factory
         )
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="worker", cookie="unb=worker")
+            AccountCreatePayload(cookie="unb=worker")
         )
         self.task = await self.store.create_background_task(
             BackgroundTaskCreatePayload(

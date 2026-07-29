@@ -769,7 +769,7 @@ class IMVerificationManager:
                         profile_type=profile_type,
                         account_id=account.account_id if account is not None else account_id,
                         account_name=(
-                            account.account_name
+                            account.display_name
                             if account is not None
                             else profile.owner_account_name
                         ),
@@ -1246,7 +1246,7 @@ class IMVerificationManager:
                     temporary_profile = await run_browser_blocking(
                         browser_profile_storage.prepare_qr,
                         session.session_id,
-                        session.account_name,
+                        None,
                     )
                 context = await self._launch_browser(
                     profile_key,
@@ -1867,7 +1867,7 @@ class IMVerificationManager:
         await run_browser_blocking(
             browser_profile_storage.prepare_account,
             account.account_id,
-            account.account_name,
+            account.display_name,
             account.browser_identity.browser_engine,
             account.browser_identity.config_revision,
         )

@@ -139,12 +139,11 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_account_qr_browser_injects_database_cookie(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; token=current",
         )
         session = QRLoginSession(
             account_id=account.account_id,
-            account_name=account.account_name,
             proxy_id=None,
             proxy=ProxyConfigPayload(),
         )
@@ -170,14 +169,14 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_profile_list_maps_accounts_and_orphans(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         store = SimpleNamespace(list_accounts=AsyncMock(return_value=[account]))
         manager = IMVerificationManager(store, SimpleNamespace())
         with tempfile.TemporaryDirectory() as root:
             storage = BrowserProfileStorage(root)
-            storage.prepare_account(account.account_id, account.account_name)
+            storage.prepare_account(account.account_id, account.display_name)
             (storage.root / "legacy-profile").mkdir()
             with patch(
                 "apps.api.xianyu_admin_api.im_verification.browser_profile_storage",
@@ -226,7 +225,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_injects_cookie_exposes_vnc_and_closes(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=token",
             enabled=False,
         )
@@ -315,7 +314,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(browser=browser_state, local=local_state):
                 account = AccountRecord(
                     account_id="account-1",
-                    account_name="seller",
+                    platform_display_name="seller",
                     cookie=local_cookie,
                 )
 
@@ -365,7 +364,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         browser_cookie = "unb=another-seller; _m_h5_tk=browser-token"
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie=local_cookie,
         )
         coordinator = _CookieCoordinator({})
@@ -401,7 +400,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         local_cookie = "unb=seller-1; _m_h5_tk=local-token"
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie=local_cookie,
         )
         coordinator = _CookieCoordinator(
@@ -449,12 +448,12 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         latest_cookie = "unb=seller-1; _m_h5_tk=concurrent-token"
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie=local_cookie,
         )
         latest = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie=latest_cookie,
         )
         coordinator = _CookieCoordinator(
@@ -501,7 +500,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         accounts = [
             AccountRecord(
                 account_id=f"account-{index}",
-                account_name=f"seller-{index}",
+                platform_display_name=f"seller-{index}",
                 cookie=f"unb=seller-{index}",
             )
             for index in (1, 2)
@@ -580,7 +579,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
             manager._account_actives[active.verification_id] = active
         account = AccountRecord(
             account_id="account-3",
-            account_name="seller-3",
+            platform_display_name="seller-3",
             cookie="unb=seller-3",
         )
         browser_settings = SimpleNamespace(account_browser_max_sessions=2)
@@ -652,7 +651,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         desktop = _VisualDesktop(slot=1, display=":100", vnc_port=5902, cdp_port=9223)
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         cookie_parser = SimpleNamespace(trans_cookies=lambda _: {"unb": "seller-1"})
@@ -689,7 +688,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         cookie_parser = SimpleNamespace(trans_cookies=lambda _: {"unb": "seller-1"})
@@ -707,7 +706,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = IMVerificationManager(SimpleNamespace(), SimpleNamespace())
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
             proxy_id="proxy-1",
             proxy=ProxyConfigPayload(enabled=False, host="127.0.0.1", port=1080),
@@ -727,7 +726,6 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = IMVerificationManager(SimpleNamespace(), SimpleNamespace())
         session = QRLoginSession(
             account_id="account-1",
-            account_name="seller",
             proxy_id="proxy-1",
             proxy=ProxyConfigPayload(enabled=False),
         )
@@ -743,7 +741,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = IMVerificationManager(SimpleNamespace(), SimpleNamespace())
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         with (
@@ -1190,7 +1188,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         result = await manager._account_proxy_exit_ips(
             AccountRecord(
                 account_id="account-1",
-                account_name="seller",
+                platform_display_name="seller",
                 proxy_id="proxy-1",
             )
         )
@@ -1274,7 +1272,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         store = SimpleNamespace(
@@ -1386,7 +1384,7 @@ class AccountBrowserManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = IMVerificationManager(SimpleNamespace(), SimpleNamespace())
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=current-user; token=current-token",
         )
         context = _FakeContext()

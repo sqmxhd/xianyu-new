@@ -404,9 +404,7 @@ class OrderActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.factory = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
         self.store = AccountStore(session_factory=self.factory, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="seller-account",
-                cookie="unb=10001; _m_h5_tk=token_1",
+            AccountCreatePayload(cookie="unb=10001; _m_h5_tk=token_1",
                 enabled=False,
             )
         )

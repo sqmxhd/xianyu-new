@@ -30,9 +30,9 @@ class AccountOrderTests(unittest.IsolatedAsyncioTestCase):
         self.engine.dispose()
 
     async def test_create_appends_and_reorder_persists(self) -> None:
-        first = await self.store.create_account(AccountCreatePayload(account_name="first"))
-        second = await self.store.create_account(AccountCreatePayload(account_name="second"))
-        third = await self.store.create_account(AccountCreatePayload(account_name="third"))
+        first = await self.store.create_account(AccountCreatePayload())
+        second = await self.store.create_account(AccountCreatePayload())
+        third = await self.store.create_account(AccountCreatePayload())
 
         self.assertEqual([first.sort_order, second.sort_order, third.sort_order], [100, 200, 300])
 
@@ -53,7 +53,7 @@ class AccountOrderTests(unittest.IsolatedAsyncioTestCase):
             [third.account_id, first.account_id, second.account_id],
         )
 
-        fourth = await self.store.create_account(AccountCreatePayload(account_name="fourth"))
+        fourth = await self.store.create_account(AccountCreatePayload())
         self.assertEqual(fourth.sort_order, 400)
         self.assertEqual(
             [account.account_id for account in await self.store.list_accounts()],
@@ -61,8 +61,8 @@ class AccountOrderTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_reorder_rejects_stale_account_set(self) -> None:
-        first = await self.store.create_account(AccountCreatePayload(account_name="first"))
-        await self.store.create_account(AccountCreatePayload(account_name="second"))
+        first = await self.store.create_account(AccountCreatePayload())
+        await self.store.create_account(AccountCreatePayload())
 
         with self.assertRaisesRegex(ValueError, "账户列表已经变化"):
             await self.store.reorder_accounts(
@@ -70,9 +70,9 @@ class AccountOrderTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_legacy_zero_sort_order_is_backfilled_in_creation_order(self) -> None:
-        first = await self.store.create_account(AccountCreatePayload(account_name="first"))
-        second = await self.store.create_account(AccountCreatePayload(account_name="second"))
-        third = await self.store.create_account(AccountCreatePayload(account_name="third"))
+        first = await self.store.create_account(AccountCreatePayload())
+        second = await self.store.create_account(AccountCreatePayload())
+        third = await self.store.create_account(AccountCreatePayload())
         with self.factory() as session:
             session.execute(update(AccountORM).values(sort_order=0))
             session.commit()

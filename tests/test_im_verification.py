@@ -30,9 +30,7 @@ class IMVerificationPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store = AccountStore(session_factory=self.sessions, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="seller",
-                cookie="unb=seller-1; _m_h5_tk=token",
+            AccountCreatePayload(cookie="unb=seller-1; _m_h5_tk=token",
             )
         )
 

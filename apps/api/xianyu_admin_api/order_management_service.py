@@ -229,7 +229,7 @@ class OrderManagementRepository:
                     OrderAccountSummaryPayload(
                         account_id=account.account_id,
                         account_name=(
-                            account.platform_display_name or account.remark or account.account_name
+                            account.display_name
                         ),
                         scope=scope,  # type: ignore[arg-type]
                         enabled=account.enabled,

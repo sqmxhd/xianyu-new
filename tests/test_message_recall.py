@@ -45,7 +45,7 @@ class MessageRecallTests(unittest.IsolatedAsyncioTestCase):
         manager._after_message_persisted = AsyncMock()
 
         result = await manager.recall_message(
-            AccountRecord(account_id="account-1", account_name="seller"),
+            AccountRecord(account_id="account-1", platform_display_name="seller"),
             "conversation-1",
             "message-pk-1",
         )
@@ -69,7 +69,7 @@ class MessageRecallTests(unittest.IsolatedAsyncioTestCase):
         manager._core = core
 
         result = await manager.recall_message(
-            AccountRecord(account_id="account-1", account_name="seller"),
+            AccountRecord(account_id="account-1", platform_display_name="seller"),
             "conversation-1",
             "message-pk-1",
         )

@@ -252,7 +252,7 @@ class ProductManagementRepository:
                 ProductAccountSummaryPayload(
                     account_id=account.account_id,
                     account_name=(
-                        account.platform_display_name or account.remark or account.account_name
+                        account.display_name
                     ),
                     enabled=account.enabled,
                     runtime_state=account.runtime.state if account.runtime else "stopped",

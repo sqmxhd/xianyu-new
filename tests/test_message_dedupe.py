@@ -34,7 +34,7 @@ class MessageDedupeTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = factory
         self.store = AccountStore(session_factory=factory, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(account_name="dedupe-account", enabled=False)
+            AccountCreatePayload(enabled=False)
         )
 
     async def asyncTearDown(self) -> None:

@@ -30,7 +30,6 @@ from .schemas import (
 )
 from .account_network import build_core_account_proxy
 from .store import AccountRecord, AccountStore
-from .notifications import BarkNotifier
 from .executors import run_external_blocking
 from .proxy_location import lookup_proxy_ip
 from .realtime import realtime_broker
@@ -65,9 +64,8 @@ class AccountRuntimeManager:
     ``third_party/XianYuApis``.
     """
 
-    def __init__(self, store: AccountStore, notifier: BarkNotifier | None = None) -> None:
+    def __init__(self, store: AccountStore) -> None:
         self._store = store
-        self._notifier = notifier or BarkNotifier(store)
         self._core: Any | None = None
         self._lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -2031,12 +2029,6 @@ class AccountRuntimeManager:
         while True:
             account, message = await queue.get()
             try:
-                try:
-                    await self._notifier.notify_inbound_message(account, message)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    await self._record_processing_error(account_id, "Bark 通知处理失败", exc)
                 try:
                     await self._handle_auto_reply(account, message)
                 except asyncio.CancelledError:

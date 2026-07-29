@@ -166,7 +166,7 @@ class OrderStoreTests(unittest.IsolatedAsyncioTestCase):
         self.store = AccountStore(session_factory=self.factory, initialize=False)
         self.repository = OrderManagementRepository(self.factory)
         self.account = await self.store.create_account(
-            AccountCreatePayload(account_name="order-account", enabled=False)
+            AccountCreatePayload(enabled=False)
         )
 
     async def asyncTearDown(self) -> None:

@@ -319,9 +319,7 @@ class ProductManagementRepositoryTests(unittest.TestCase):
         self.repository = ProductManagementRepository(self.sessions)
         self.account = asyncio.run(
             self.store.create_account(
-                AccountCreatePayload(
-                    account_name="测试账户",
-                    cookie="unb=10001; _m_h5_tk=token_1",
+                AccountCreatePayload(cookie="unb=10001; _m_h5_tk=token_1",
                     enabled=True,
                 )
             )

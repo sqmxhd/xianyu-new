@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .account_labels import platform_account_display_name
 from .database import Base, UTCDateTime
 
 
@@ -124,7 +125,6 @@ class AccountORM(Base):
     )
 
     account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    account_name: Mapped[str] = mapped_column(String(80), nullable=False)
     remark: Mapped[str | None] = mapped_column(String(500), nullable=True)
     platform: Mapped[str] = mapped_column(
         String(32), nullable=False, default="xianyu", server_default="xianyu", index=True
@@ -173,6 +173,14 @@ class AccountORM(Base):
     cookie_update_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     im_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     im_token_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    @property
+    def display_name(self) -> str:
+        return platform_account_display_name(
+            self.account_id,
+            self.platform_display_name,
+            self.platform,
+        )
 
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -242,11 +250,6 @@ class AccountORM(Base):
     order_sync_runs: Mapped[list["OrderSyncRunORM"]] = relationship(
         back_populates="account",
         cascade="all, delete-orphan",
-    )
-    notification_setting: Mapped["AccountNotificationORM"] = relationship(
-        back_populates="account",
-        cascade="all, delete-orphan",
-        uselist=False,
     )
     auto_reply_setting: Mapped["AutoReplySettingORM"] = relationship(
         back_populates="account",
@@ -1028,45 +1031,6 @@ class OrderSyncRunORM(Base):
     account: Mapped[AccountORM] = relationship(back_populates="order_sync_runs")
 
 
-class BarkConfigORM(Base):
-    __tablename__ = "xianyu_bark_config"
-
-    config_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    server_url: Mapped[str] = mapped_column(String(500), nullable=False, default="https://api.day.app")
-    device_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    sound: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    group: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    icon: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(),
-        nullable=False,
-        default=utcnow,
-        onupdate=utcnow,
-    )
-
-
-class AccountNotificationORM(Base):
-    __tablename__ = "xianyu_account_notifications"
-
-    account_id: Mapped[str] = mapped_column(
-        String(64),
-        ForeignKey("xianyu_accounts.account_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(),
-        nullable=False,
-        default=utcnow,
-        onupdate=utcnow,
-    )
-
-    account: Mapped[AccountORM] = relationship(back_populates="notification_setting")
-
-
 class AutoReplySettingORM(Base):
     __tablename__ = "xianyu_auto_reply_settings"
 
@@ -1811,6 +1775,12 @@ class ChatwootConfigORM(Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    account_alerts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+    offline_alert_delay_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default="120"
+    )
     base_url: Mapped[str] = mapped_column(String(1000), nullable=False)
     inbox_identifier: Mapped[str] = mapped_column(String(160), nullable=False)
     chatwoot_inbox_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1864,6 +1834,11 @@ class ChatwootInboxBindingORM(Base):
     webhook_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     label_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     label_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    alert_source_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    alert_contact_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    alert_conversation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_alert_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_alert_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="ready", server_default="ready"
     )

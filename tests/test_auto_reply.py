@@ -51,9 +51,16 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
             UserCreatePayload(username="reply-owner", password="password-123")
         )
         self.account = await self.store.create_account(
-            AccountCreatePayload(account_name="test-account", enabled=False),
+            AccountCreatePayload(enabled=False),
             automation_owner_user_id=self.user.user_id,
         )
+        self.account = await self.store.update_account_platform_identity(
+            self.account.account_id,
+            platform_user_id="seller-test-account",
+            display_name="test-account",
+            avatar_url=None,
+        )
+        assert self.account is not None
         await self.store.record_message(
             account_id=self.account.account_id,
             conversation_id="conversation-1",
@@ -100,16 +107,15 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
             AccountCreatePayload(enabled=False),
             automation_owner_user_id=self.user.user_id,
         )
-        self.assertTrue(unnamed.account_name.startswith("闲鱼账户-"))
+        self.assertTrue(unnamed.display_name.startswith("闲鱼账户-"))
         self.assertIsNone(unnamed.remark)
 
         account = await self.store.create_account(
             AccountCreatePayload(remark="售后备用账户", enabled=False),
             automation_owner_user_id=self.user.user_id,
         )
-        self.assertTrue(account.account_name.startswith("售后备用账户"))
         self.assertEqual(account.remark, "售后备用账户")
-        self.assertEqual(account.display_name, "售后备用账户")
+        self.assertTrue(account.display_name.startswith("闲鱼账户-"))
 
         updated = await self.store.update_account(
             account.account_id,
@@ -242,7 +248,7 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_account_switches_are_independent(self) -> None:
         second = await self.store.create_account(
-            AccountCreatePayload(account_name="second", enabled=False),
+            AccountCreatePayload(enabled=False),
             automation_owner_user_id=self.user.user_id,
         )
         await self.store.update_account_auto_reply(
@@ -316,7 +322,7 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_rule_scope_and_inbound_claim_are_idempotent(self) -> None:
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="rule-account", enabled=False),
+            AccountCreatePayload(enabled=False),
             automation_owner_user_id=self.user.user_id,
         )
         await self.store.update_account_auto_reply(

@@ -361,7 +361,6 @@ class AuthSetupStatusPayload(BaseModel):
 
 class XianyuQRStartPayload(BaseModel):
     account_id: str | None = Field(default=None, max_length=64)
-    account_name: str | None = Field(default=None, max_length=80)
     remark: str | None = Field(default=None, max_length=500)
     client_request_id: str | None = Field(default=None, max_length=128)
     proxy_id: str | None = Field(default=None, max_length=64)
@@ -369,7 +368,6 @@ class XianyuQRStartPayload(BaseModel):
 
     @field_validator(
         "account_id",
-        "account_name",
         "remark",
         "client_request_id",
         "proxy_id",
@@ -631,7 +629,6 @@ class ProxyPayload(BaseModel):
 
 
 class AccountCreatePayload(BaseModel):
-    account_name: str | None = Field(default=None, min_length=1, max_length=80)
     remark: str | None = Field(default=None, max_length=500)
     cookie: str = Field(default="", max_length=10000)
     enabled: bool = True
@@ -645,7 +642,7 @@ class AccountCreatePayload(BaseModel):
         default_factory=AccountBrowserIdentityPayload
     )
 
-    @field_validator("account_name", "remark", "cookie", mode="before")
+    @field_validator("remark", "cookie", mode="before")
     @classmethod
     def normalize_string(cls, value: object) -> object:
         if isinstance(value, str):
@@ -684,7 +681,6 @@ class AccountReorderPayload(BaseModel):
 
 
 class AccountUpdatePayload(BaseModel):
-    account_name: str | None = Field(default=None, min_length=1, max_length=80)
     remark: str | None = Field(default=None, max_length=500)
     cookie: str | None = Field(default=None, max_length=10000)
     enabled: bool | None = None
@@ -692,7 +688,7 @@ class AccountUpdatePayload(BaseModel):
     proxy: ProxyConfigPayload | None = None
     browser_identity: AccountBrowserIdentityPayload | None = None
 
-    @field_validator("account_name", "remark", "cookie", mode="before")
+    @field_validator("remark", "cookie", mode="before")
     @classmethod
     def normalize_string(cls, value: object) -> object:
         if isinstance(value, str):
@@ -1022,52 +1018,6 @@ class QuickPhraseCreatePayload(BaseModel):
 
 class QuickPhraseUpdatePayload(QuickPhraseCreatePayload):
     pass
-
-
-class BarkConfigPayload(BaseModel):
-    enabled: bool = False
-    server_url: str = Field(default="https://api.day.app", max_length=500)
-    device_key: str = Field(default="", max_length=255)
-    sound: str | None = Field(default=None, max_length=80)
-    group: str | None = Field(default="多平台管理", max_length=80)
-    icon: str | None = Field(default=None, max_length=500)
-
-    @field_validator("server_url", "device_key", "sound", "group", "icon", mode="before")
-    @classmethod
-    def normalize_string(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
-
-
-class BarkTestPayload(BaseModel):
-    title: str = Field(default="多平台管理测试通知", min_length=1, max_length=200)
-    body: str = Field(default="Bark 通知配置可用。", min_length=1, max_length=4000)
-
-    @field_validator("title", "body", mode="before")
-    @classmethod
-    def normalize_string(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
-
-
-class NotificationResultPayload(BaseModel):
-    ok: bool
-    message: str
-    status_code: int | None = None
-    response_text: str | None = None
-
-
-class AccountNotificationPayload(BaseModel):
-    account_id: str
-    enabled: bool = True
-    created_at: datetime
-    updated_at: datetime
-
-
-class AccountNotificationUpdatePayload(BaseModel):
-    enabled: bool
 
 
 class AccountAutoReplyUpdatePayload(BaseModel):
@@ -2108,6 +2058,8 @@ class BackgroundTaskCreatePayload(BaseModel):
 class ChatwootConfigPayload(BaseModel):
     config_id: str = "default"
     enabled: bool = False
+    account_alerts_enabled: bool = True
+    offline_alert_delay_seconds: int = 120
     base_url: str
     inbox_identifier: str
     chatwoot_inbox_id: int | None = None
@@ -2133,6 +2085,8 @@ class ChatwootConfigPayload(BaseModel):
 
 class ChatwootConfigUpdatePayload(BaseModel):
     enabled: bool = False
+    account_alerts_enabled: bool = True
+    offline_alert_delay_seconds: int = Field(default=120, ge=30, le=3600)
     base_url: str = Field(min_length=8, max_length=1000)
     inbox_identifier: str = Field(min_length=8, max_length=160)
     callback_url: str | None = Field(default=None, min_length=8, max_length=1000)
@@ -2427,7 +2381,6 @@ class IMHealthPayload(BaseModel):
 
 class AccountPayload(BaseModel):
     account_id: str
-    account_name: str
     remark: str | None = None
     display_name: str
     platform: str = "xianyu"
@@ -2442,7 +2395,6 @@ class AccountPayload(BaseModel):
     chat_enabled: bool = False
     order_management_visible: bool = True
     product_management_visible: bool = True
-    notification_enabled: bool = True
     auto_reply_enabled: bool = False
     automation_owner_user_id: str | None = None
     has_cookie: bool

@@ -30,7 +30,7 @@ class ConversationBatchTests(unittest.IsolatedAsyncioTestCase):
         self.factory = factory
         self.store = AccountStore(session_factory=factory, initialize=False)
         self.account = await self.store.create_account(
-            AccountCreatePayload(account_name="batch-account", enabled=False)
+            AccountCreatePayload(enabled=False)
         )
 
     async def asyncTearDown(self) -> None:
@@ -285,9 +285,7 @@ class ConversationBatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_account_identity_must_match_cookie_owner(self) -> None:
         account = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="identity-account",
-                cookie="unb=seller-100; _m_h5_tk=token_1",
+            AccountCreatePayload(cookie="unb=seller-100; _m_h5_tk=token_1",
                 enabled=False,
             )
         )

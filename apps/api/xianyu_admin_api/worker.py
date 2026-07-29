@@ -20,10 +20,12 @@ from redis.exceptions import RedisError
 
 from .queue import TASK_QUEUE_NAME, resolve_broker_url
 from .chatwoot import (
+    CHATWOOT_ACCOUNT_ALERT_TASK,
     CHATWOOT_ACCOUNT_METADATA_TASK,
     CHATWOOT_ACCOUNT_STATUS_TASK,
     CHATWOOT_LOCAL_MESSAGE_TASK,
     CHATWOOT_WEBHOOK_TASK,
+    execute_account_alert_task,
     execute_account_metadata_task,
     execute_account_status_task,
     execute_local_message_task,
@@ -490,6 +492,28 @@ async def execute_task(store: AccountStore, task: BackgroundTaskPayload) -> dict
             message=payload.get("message") if isinstance(payload.get("message"), str) else None,
         )
 
+    if task.task_type == CHATWOOT_ACCOUNT_ALERT_TASK:
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        account_id = task.account_id or payload.get("account_id")
+        state = payload.get("state")
+        if not isinstance(account_id, str) or not isinstance(state, str):
+            raise ValueError("chatwoot.send_account_alert requires account_id and state")
+        return await execute_account_alert_task(
+            store,
+            account_id=account_id,
+            state=state,
+            message=(
+                payload.get("message")
+                if isinstance(payload.get("message"), str)
+                else None
+            ),
+            expected_state=(
+                payload.get("expected_state")
+                if isinstance(payload.get("expected_state"), str)
+                else None
+            ),
+        )
+
     if task.task_type == CHATWOOT_ACCOUNT_METADATA_TASK:
         payload = task.payload if isinstance(task.payload, dict) else {}
         account_id = task.account_id or payload.get("account_id")
@@ -902,6 +926,7 @@ async def _execute_claimed_task(
         if task.task_type in {
             CHATWOOT_LOCAL_MESSAGE_TASK,
             CHATWOOT_WEBHOOK_TASK,
+            CHATWOOT_ACCOUNT_ALERT_TASK,
             CHATWOOT_ACCOUNT_STATUS_TASK,
             CHATWOOT_ACCOUNT_METADATA_TASK,
         }:

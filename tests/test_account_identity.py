@@ -38,7 +38,7 @@ class AccountBrowserIdentityPersistenceTests(unittest.IsolatedAsyncioTestCase):
             timezone="Asia/Shanghai",
         )
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="seller", browser_identity=identity)
+            AccountCreatePayload(browser_identity=identity)
         )
 
         self.assertEqual(account.browser_identity.fingerprint_seed, 1_234_567)
@@ -74,7 +74,7 @@ class AccountBrowserIdentityPersistenceTests(unittest.IsolatedAsyncioTestCase):
             brand="Edge",
         )
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="edge", browser_identity=identity)
+            AccountCreatePayload(browser_identity=identity)
         )
         self.assertIn("Chrome/148.0.7778.215", account.client_identity.user_agent)
         self.assertIn("Edg/148.0.7778.215", account.client_identity.user_agent)
@@ -83,7 +83,7 @@ class AccountBrowserIdentityPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fingerprint_snapshot_tracks_stability_for_same_revision(self) -> None:
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="snapshot")
+            AccountCreatePayload()
         )
         snapshot = BrowserFingerprintSnapshotPayload(
             browser_engine="system_chromium",
@@ -154,12 +154,10 @@ class AccountBrowserIdentityPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_standard_browser_source_distinguishes_system_and_managed(self) -> None:
         system = await self.store.create_account(
-            AccountCreatePayload(account_name="system-browser")
+            AccountCreatePayload()
         )
         managed = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="managed-browser",
-                browser_identity=AccountBrowserIdentityPayload(
+            AccountCreatePayload(browser_identity=AccountBrowserIdentityPayload(
                     browser_version="149.0.7827.55"
                 ),
             )
@@ -180,17 +178,17 @@ class AccountBrowserIdentityPersistenceTests(unittest.IsolatedAsyncioTestCase):
             browser_version="136.0.7103.49",
         )
         await self.store.create_account(
-            AccountCreatePayload(account_name="first", browser_identity=identity)
+            AccountCreatePayload(browser_identity=identity)
         )
 
         with self.assertRaisesRegex(ValueError, "Seed"):
             await self.store.create_account(
-                AccountCreatePayload(account_name="second", browser_identity=identity)
+                AccountCreatePayload(browser_identity=identity)
             )
 
     async def test_account_delete_cascades_identity_row(self) -> None:
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="delete-me")
+            AccountCreatePayload()
         )
         self.assertTrue(await self.store.delete_account(account.account_id))
 

@@ -8,7 +8,7 @@ class AccountHealthTests(unittest.TestCase):
     def test_missing_cookie_and_offline_im_are_independent(self) -> None:
         payload = AccountRecord(
             account_id="missing-cookie",
-            account_name="missing-cookie",
+            platform_display_name="missing-cookie",
             cookie="",
             runtime=RuntimeStatusRecord(account_id="missing-cookie", state="auth_expired"),
         ).to_payload()
@@ -21,7 +21,7 @@ class AccountHealthTests(unittest.TestCase):
         checked_at = datetime.now(UTC)
         payload = AccountRecord(
             account_id="online",
-            account_name="online",
+            platform_display_name="online",
             cookie="unb=seller-1",
             runtime=RuntimeStatusRecord(
                 account_id="online",
@@ -38,7 +38,7 @@ class AccountHealthTests(unittest.TestCase):
         checked_at = datetime.now(UTC) - timedelta(minutes=2)
         payload = AccountRecord(
             account_id="proxy-failed",
-            account_name="proxy-failed",
+            platform_display_name="proxy-failed",
             cookie="unb=seller-1",
             cookie_renewal_last_verified_at=checked_at,
             cookie_renewal_last_verified_source="scheduled_renewal",
@@ -59,7 +59,7 @@ class AccountHealthTests(unittest.TestCase):
         failed_at = datetime.now(UTC)
         payload = AccountRecord(
             account_id="expired",
-            account_name="expired",
+            platform_display_name="expired",
             cookie="unb=seller-1",
             cookie_renewal_state="failed",
             cookie_renewal_error_kind="auth_expired",

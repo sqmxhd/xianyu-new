@@ -74,7 +74,6 @@ class QRLoginSessionTests(unittest.TestCase):
     def make_session(self) -> QRLoginSession:
         return QRLoginSession(
             account_id="account-1",
-            account_name="seller",
             proxy_id=None,
             proxy=ProxyConfigPayload(),
         )
@@ -353,7 +352,7 @@ class QRLoginPersistenceTests(unittest.IsolatedAsyncioTestCase):
             await main.qr_initialize_tasks[first.session_id]
         try:
             self.assertEqual(first.session_id, second.session_id)
-            self.assertIsNone(main.qr_login_sessions[first.session_id].account_name)
+            self.assertFalse(hasattr(main.qr_login_sessions[first.session_id], "account_name"))
             start.assert_called_once()
         finally:
             main._discard_qr_session(first.session_id)
@@ -363,7 +362,6 @@ class QRLoginPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         session = QRLoginSession(
             account_id="account-single-flight",
-            account_name="single-flight",
             proxy_id=None,
             proxy=ProxyConfigPayload(),
         )
@@ -419,7 +417,6 @@ class QRBrowserVerificationManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_mismatched_existing_account_is_rejected_without_closing_browser(self) -> None:
         session = QRLoginSession(
             account_id="account-1",
-            account_name="seller",
             proxy_id=None,
             proxy=ProxyConfigPayload(),
         )

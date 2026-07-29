@@ -127,7 +127,7 @@ class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_profile_cleanup_is_account_scoped(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1",
         )
         cleanup = AsyncMock(return_value=True)
@@ -146,7 +146,7 @@ class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_cookie_reveal_is_explicit_and_not_cached(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=secret-token",
             enabled=True,
         )
@@ -160,13 +160,13 @@ class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_revealed_cookie_is_not_reapplied(self) -> None:
         previous = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=secret-token",
             enabled=True,
         )
         updated = AccountRecord(
             account_id="account-1",
-            account_name="renamed-seller",
+            platform_display_name="renamed-seller",
             cookie=previous.cookie,
             enabled=True,
         )
@@ -179,14 +179,14 @@ class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
         ):
             await main.update_account(
                 previous.account_id,
-                AccountUpdatePayload(account_name=updated.account_name, cookie=previous.cookie),
+                AccountUpdatePayload(cookie=previous.cookie),
             )
         replace_cookie.assert_not_awaited()
 
     async def test_disabled_account_cannot_report_successful_start(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=token",
             enabled=False,
         )
@@ -200,7 +200,7 @@ class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_verification_cannot_start_without_risk_state(self) -> None:
         account = AccountRecord(
             account_id="account-1",
-            account_name="seller",
+            platform_display_name="seller",
             cookie="unb=seller-1; _m_h5_tk=token",
             enabled=True,
         )

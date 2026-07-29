@@ -11,7 +11,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.api.xianyu_admin_api.database import Base, _ensure_proxy_assignment_index
+from apps.api.xianyu_admin_api.database import (
+    Base,
+    _drop_legacy_account_name,
+    _drop_legacy_notification_tables,
+    _ensure_proxy_assignment_index,
+)
 from apps.api.xianyu_admin_api.proxy_location import ProxyIPLocation
 from apps.api.xianyu_admin_api.runtime import AccountRuntimeManager
 from apps.api.xianyu_admin_api.schemas import (
@@ -147,7 +152,7 @@ class ProxyAssignmentMigrationTests(unittest.TestCase):
                 )
             )
 
-        with self.assertRaisesRegex(RuntimeError, "seller-a.*seller-b"):
+        with self.assertRaisesRegex(RuntimeError, "account-1.*account-2"):
             _ensure_proxy_assignment_index(engine)
 
         with engine.connect() as connection:
@@ -159,6 +164,73 @@ class ProxyAssignmentMigrationTests(unittest.TestCase):
             "uq_xianyu_accounts_proxy_id",
             {index["name"] for index in inspect(engine).get_indexes("xianyu_accounts")},
         )
+        engine.dispose()
+
+    def test_retired_account_name_column_is_dropped_without_losing_account(self) -> None:
+        engine = self.make_legacy_engine()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO xianyu_accounts "
+                    "(account_id, account_name, proxy_id, created_at) "
+                    "VALUES ('account-1', 'legacy-alias', NULL, '2026-01-01')"
+                )
+            )
+
+        _drop_legacy_account_name(engine)
+
+        self.assertNotIn(
+            "account_name",
+            {column["name"] for column in inspect(engine).get_columns("xianyu_accounts")},
+        )
+        with engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text(
+                        "SELECT account_id FROM xianyu_accounts "
+                        "WHERE account_id = 'account-1'"
+                    )
+                ).scalar_one(),
+                "account-1",
+            )
+        engine.dispose()
+
+    def test_retired_bark_tables_are_dropped_without_touching_accounts(self) -> None:
+        engine = self.make_legacy_engine()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE xianyu_bark_config ("
+                    "config_id VARCHAR(64) PRIMARY KEY)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE xianyu_account_notifications ("
+                    "account_id VARCHAR(64) PRIMARY KEY, "
+                    "enabled BOOLEAN NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO xianyu_accounts "
+                    "(account_id, account_name, proxy_id, created_at) "
+                    "VALUES ('account-1', 'seller-a', NULL, '2026-01-01')"
+                )
+            )
+
+        _drop_legacy_notification_tables(engine)
+
+        tables = set(inspect(engine).get_table_names())
+        self.assertNotIn("xianyu_bark_config", tables)
+        self.assertNotIn("xianyu_account_notifications", tables)
+        with engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT COUNT(*) FROM xianyu_accounts")
+                ).scalar_one(),
+                1,
+            )
         engine.dispose()
 
 
@@ -185,7 +257,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.store.create_account(
-            AccountCreatePayload(account_name="seller", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
 
         with self.assertRaisesRegex(ValueError, "cannot be disabled"):
@@ -206,15 +278,21 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "proxy is disabled"):
             await self.store.create_account(
-                AccountCreatePayload(account_name="seller", proxy_id=proxy.proxy_id)
+                AccountCreatePayload(proxy_id=proxy.proxy_id)
             )
 
     async def test_proxy_cannot_be_assigned_to_two_accounts(self) -> None:
         proxy = await self.store.create_proxy(
             ProxyCreatePayload(name="exclusive", host="127.0.0.1", port=1080)
         )
-        await self.store.create_account(
-            AccountCreatePayload(account_name="seller-a", proxy_id=proxy.proxy_id)
+        owner = await self.store.create_account(
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
+        )
+        await self.store.update_account_platform_identity(
+            owner.account_id,
+            platform_user_id="seller-a-id",
+            display_name="seller-a",
+            avatar_url=None,
         )
 
         with self.assertRaisesRegex(
@@ -222,7 +300,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             "已绑定账户.*seller-a",
         ):
             await self.store.create_account(
-                AccountCreatePayload(account_name="seller-b", proxy_id=proxy.proxy_id)
+                AccountCreatePayload(proxy_id=proxy.proxy_id)
             )
 
     async def test_failed_proxy_switch_preserves_existing_binding(self) -> None:
@@ -233,10 +311,10 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="occupied", host="127.0.0.1", port=1082)
         )
         first_account = await self.store.create_account(
-            AccountCreatePayload(account_name="seller-a", proxy_id=first_proxy.proxy_id)
+            AccountCreatePayload(proxy_id=first_proxy.proxy_id)
         )
         await self.store.create_account(
-            AccountCreatePayload(account_name="seller-b", proxy_id=occupied_proxy.proxy_id)
+            AccountCreatePayload(proxy_id=occupied_proxy.proxy_id)
         )
 
         with self.assertRaises(ProxyAssignmentConflict):
@@ -254,7 +332,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="retained", host="127.0.0.1", port=1083)
         )
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="seller", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
 
         updated = await self.store.update_account(
@@ -270,7 +348,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="released", host="127.0.0.1", port=1084)
         )
         first = await self.store.create_account(
-            AccountCreatePayload(account_name="seller-a", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
         await self.store.update_account(
             first.account_id,
@@ -278,7 +356,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         second = await self.store.create_account(
-            AccountCreatePayload(account_name="seller-b", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
 
         self.assertEqual(second.proxy_id, proxy.proxy_id)
@@ -288,7 +366,7 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="legacy-residue", host="127.0.0.1", port=1089)
         )
         account = await self.store.create_account(
-            AccountCreatePayload(account_name="seller", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
         with self.factory() as session:
             row = session.get(AccountORM, account.account_id)
@@ -316,16 +394,14 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="disabled-owner", host="127.0.0.1", port=1085)
         )
         await self.store.create_account(
-            AccountCreatePayload(
-                account_name="disabled-seller",
-                enabled=False,
+            AccountCreatePayload(enabled=False,
                 proxy_id=proxy.proxy_id,
             )
         )
 
         with self.assertRaises(ProxyAssignmentConflict):
             await self.store.create_account(
-                AccountCreatePayload(account_name="other", proxy_id=proxy.proxy_id)
+                AccountCreatePayload(proxy_id=proxy.proxy_id)
             )
 
     async def test_database_unique_index_is_final_assignment_guard(self) -> None:
@@ -333,14 +409,14 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="db-guard", host="127.0.0.1", port=1086)
         )
         await self.store.create_account(
-            AccountCreatePayload(account_name="seller-a", proxy_id=proxy.proxy_id)
+            AccountCreatePayload(proxy_id=proxy.proxy_id)
         )
 
         with self.factory() as session:
             session.add(
                 AccountORM(
                     account_id="bypass-store",
-                    account_name="seller-b",
+                    platform_display_name="seller-b",
                     platform="xianyu",
                     cookie="",
                     enabled=True,
@@ -358,14 +434,12 @@ class ProxyPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ProxyCreatePayload(name="qr-occupied", host="127.0.0.1", port=1088)
         )
         first = await self.store.create_account(
-            AccountCreatePayload(
-                account_name="seller-a",
-                cookie="old-cookie",
+            AccountCreatePayload(cookie="old-cookie",
                 proxy_id=first_proxy.proxy_id,
             )
         )
         await self.store.create_account(
-            AccountCreatePayload(account_name="seller-b", proxy_id=occupied_proxy.proxy_id)
+            AccountCreatePayload(proxy_id=occupied_proxy.proxy_id)
         )
 
         with self.assertRaises(ProxyAssignmentConflict):
