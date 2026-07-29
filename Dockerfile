@@ -80,7 +80,7 @@ COPY deploy/nginx/xianyu-container.conf /app/deploy/nginx/xianyu-container.conf
 COPY .env.example README.md /app/
 COPY --from=frontend /src/apps/admin/dist /app/apps/admin/dist
 
-RUN python /app/tools/package/entry.py verify
+RUN python -m tools.package.entry verify
 
 EXPOSE 8000 8443
 VOLUME ["/data/product-images", "/data/browser-profiles", "/data/fingerprint-chromium", "/data/standard-chromium"]
