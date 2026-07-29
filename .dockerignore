@@ -4,6 +4,8 @@
 .ci-venv
 artifacts
 data
+!apps/api/xianyu_admin_api/data
+!apps/api/xianyu_admin_api/data/**
 node_modules
 apps/admin/node_modules
 apps/admin/dist

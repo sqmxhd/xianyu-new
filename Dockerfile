@@ -80,6 +80,8 @@ COPY deploy/nginx/xianyu-container.conf /app/deploy/nginx/xianyu-container.conf
 COPY .env.example README.md /app/
 COPY --from=frontend /src/apps/admin/dist /app/apps/admin/dist
 
+RUN python /app/tools/package/entry.py verify
+
 EXPOSE 8000 8443
 VOLUME [
   "/data/product-images",

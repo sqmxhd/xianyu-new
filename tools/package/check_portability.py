@@ -71,7 +71,7 @@ def main() -> int:
             if pattern in content:
                 failures.append(f"{path.relative_to(ROOT)} contains {pattern}")
 
-    stage_names = {"test", "binary", "docker"}
+    stage_names = {"test", "docker"}
     for path in (ROOT / ".gitlab" / "ci").glob("*.yml"):
         content = path.read_text(encoding="utf-8")
         for job_name, count in cache_key_file_counts(content):

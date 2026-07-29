@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import tempfile
 import unittest
@@ -11,6 +12,47 @@ from tools.package.build import resolve_version
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_pipeline_only_builds_container_artifacts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pipeline = (root / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        docker_jobs = (root / ".gitlab" / "ci" / "docker.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("stages:\n  - test\n  - docker", pipeline)
+        self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
+        self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
+        self.assertIn("image-amd64:", docker_jobs)
+        self.assertIn("archive-amd64:", docker_jobs)
+
+    def test_container_geoip_resources_are_complete(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = {
+            "geoip.db": (
+                24_189_340,
+                "44fc8373bf2c86a429dd4d6d240283a3768c4ca187db8811fcd9cb65c1d7cb3e",
+            ),
+            "ip2region_v4.xdb": (
+                10_641_896,
+                "59d4ce4ffd9dfcab94ff08dd0fa842e3cc7f19684f16a12396e80a0226a5d3a7",
+            ),
+        }
+        resource_root = root / "apps" / "api" / "xianyu_admin_api" / "data"
+        for name, (size, digest) in expected.items():
+            with self.subTest(name=name):
+                path = resource_root / name
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.stat().st_size, size)
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    digest,
+                )
+
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("python /app/tools/package/entry.py verify", dockerfile)
+        dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("!apps/api/xianyu_admin_api/data/**", dockerignore)
+
     def test_container_deployment_has_no_fixed_public_origin(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.yml").read_text(encoding="utf-8")

@@ -5,6 +5,10 @@
 .env.docker
 .env.*.local
 data/
+!apps/api/xianyu_admin_api/data/
+!apps/api/xianyu_admin_api/data/IP2REGION_NOTICE.md
+!apps/api/xianyu_admin_api/data/geoip.db
+!apps/api/xianyu_admin_api/data/ip2region_v4.xdb
 __pycache__/
 *.py[cod]
 *.log

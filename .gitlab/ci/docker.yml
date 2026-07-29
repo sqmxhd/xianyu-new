@@ -27,6 +27,13 @@ image-amd64:
   extends:
     - .buildkit
     - .branch-or-release
+  needs:
+    - job: backend
+      artifacts: false
+    - job: frontend
+      artifacts: false
+    - job: portability
+      artifacts: false
   script:
     - |
       set -eu
@@ -57,6 +64,13 @@ archive-amd64:
   extends:
     - .buildkit
     - .release-or-manual
+  needs:
+    - job: backend
+      artifacts: false
+    - job: frontend
+      artifacts: false
+    - job: portability
+      artifacts: false
   script:
     - |
       set -eu

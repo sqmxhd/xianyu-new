@@ -42,11 +42,6 @@ frontend:
   script:
     - npm --prefix apps/admin ci
     - npm --prefix apps/admin run build
-  artifacts:
-    name: "${PACKAGE_NAME}-${CI_COMMIT_SHORT_SHA}-frontend"
-    expire_in: 14 days
-    paths:
-      - apps/admin/dist/
 
 portability:
   stage: test
