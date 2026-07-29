@@ -58,7 +58,7 @@ image-amd64:
         --opt "build-arg:BUILD_COMMIT=$CI_COMMIT_SHA" \
         --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
         --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64,mode=max" \
-        --output "type=image,name=$names,push=true"
+        --output "type=image,\"name=$names\",push=true"
 
 archive-amd64:
   extends:

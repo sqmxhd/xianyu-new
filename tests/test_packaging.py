@@ -24,6 +24,10 @@ class PackagingContractTests(unittest.TestCase):
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
         self.assertIn("archive-amd64:", docker_jobs)
+        self.assertIn(
+            '--output "type=image,\\"name=$names\\",push=true"',
+            docker_jobs,
+        )
 
     def test_container_geoip_resources_are_complete(self) -> None:
         root = Path(__file__).resolve().parents[1]
