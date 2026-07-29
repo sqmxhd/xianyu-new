@@ -18,7 +18,7 @@ linux-x64:
     policy: pull-push
   before_script:
     - apt-get update
-    - apt-get install -y --no-install-recommends binutils python3 python3-pip python3-venv
+    - apt-get install -y --no-install-recommends binutils python3 python3-venv
     - rm -rf /var/lib/apt/lists/*
   script:
     - bash tools/package/build_linux.sh
