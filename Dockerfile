@@ -83,12 +83,7 @@ COPY --from=frontend /src/apps/admin/dist /app/apps/admin/dist
 RUN python /app/tools/package/entry.py verify
 
 EXPOSE 8000 8443
-VOLUME [
-  "/data/product-images",
-  "/data/browser-profiles",
-  "/data/fingerprint-chromium",
-  "/data/standard-chromium"
-]
+VOLUME ["/data/product-images", "/data/browser-profiles", "/data/fingerprint-chromium", "/data/standard-chromium"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "python", "/app/tools/container_entry.py"]
 CMD ["api"]
