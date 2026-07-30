@@ -12,6 +12,7 @@ from pathlib import Path
 APP_USER = "xianyu"
 WRITABLE_DIRECTORIES = (
     Path("/data/product-images"),
+    Path("/data/web-notification-sounds"),
     Path("/data/browser-profiles"),
     Path("/data/fingerprint-chromium"),
     Path("/data/standard-chromium"),

@@ -26,7 +26,7 @@
 image-amd64:
   extends:
     - .buildkit
-    - .branch-or-release
+    - .container-release
   needs:
     - job: backend
       artifacts: false
@@ -39,14 +39,10 @@ image-amd64:
       set -eu
       if [ -n "${CI_COMMIT_TAG:-}" ]; then
         version="${CI_COMMIT_TAG#v}"
+        names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version"
       else
         version="${CI_COMMIT_SHORT_SHA}"
-      fi
-      names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version"
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        names="$names,$CI_REGISTRY_IMAGE:latest"
-      elif [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH:-}" ]; then
-        names="$names,$CI_REGISTRY_IMAGE:edge"
+        names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version,$CI_REGISTRY_IMAGE:latest"
       fi
       buildctl-daemonless.sh build \
         --frontend dockerfile.v0 \
@@ -59,43 +55,3 @@ image-amd64:
         --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
         --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64,mode=max" \
         --output "type=image,\"name=$names\",push=true"
-
-archive-amd64:
-  extends:
-    - .buildkit
-    - .release-or-manual
-  needs:
-    - job: backend
-      artifacts: false
-    - job: frontend
-      artifacts: false
-    - job: portability
-      artifacts: false
-  script:
-    - |
-      set -eu
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        version="${CI_COMMIT_TAG#v}"
-      else
-        version="${CI_COMMIT_SHORT_SHA}"
-      fi
-      archive="$PACKAGE_NAME-$version-linux-amd64.oci.tar"
-      mkdir -p artifacts
-      buildctl-daemonless.sh build \
-        --frontend dockerfile.v0 \
-        --local context=. \
-        --local dockerfile=. \
-        --opt filename=Dockerfile \
-        --opt "build-arg:BASE_IMAGE_PREFIX=$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX" \
-        --opt "build-arg:BUILD_VERSION=$version" \
-        --opt "build-arg:BUILD_COMMIT=$CI_COMMIT_SHA" \
-        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
-        --output "type=oci,name=$PACKAGE_NAME:$version,dest=artifacts/$archive"
-      gzip -9 "artifacts/$archive"
-      sha256sum "artifacts/$archive.gz" > "artifacts/$archive.gz.sha256"
-  artifacts:
-    name: "${PACKAGE_NAME}-${CI_COMMIT_SHORT_SHA}-linux-amd64-oci"
-    expire_in: 14 days
-    paths:
-      - artifacts/xianyu-admin-*-linux-amd64.oci.tar.gz
-      - artifacts/xianyu-admin-*-linux-amd64.oci.tar.gz.sha256

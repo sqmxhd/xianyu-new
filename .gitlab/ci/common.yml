@@ -1,12 +1,4 @@
-.branch-or-release:
+.container-release:
   rules:
     - if: $CI_COMMIT_TAG
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - when: manual
-      allow_failure: true
-
-.release-or-manual:
-  rules:
-    - if: $CI_COMMIT_TAG
-    - when: manual
-      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "tg"'

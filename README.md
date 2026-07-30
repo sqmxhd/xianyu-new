@@ -36,33 +36,38 @@ npm run dev:hot
 npm test
 ```
 
-## 打包与容器
+## 发布与容器
 
-GitLab 三阶段流水线、Linux/Windows 二进制包和 Docker Compose 的说明见
+GitLab 测试、Docker 镜像发布和 Docker Compose 部署说明见
 [`docs/packaging.md`](docs/packaging.md)。
 
-本地 Linux 打包：
+本地开发继续使用源码启动，不经过 Docker：
 
 ```bash
-bash tools/package/build_linux.sh
+npm run dev
 ```
 
-Docker HTTPS 部署：
+Docker HTTPS 部署从 GitLab Registry 拉取 `tg` 分支发布的 `latest`：
 
 ```bash
 cp .env.docker.example .env.docker
-docker compose --env-file .env.docker --profile bundled up -d --build
+docker login 192.168.2.5:5050
+docker compose --env-file .env.docker --profile bundled pull
+docker compose --env-file .env.docker --profile bundled up -d --wait --remove-orphans
 ```
 
 使用已有的外部 MySQL 和 Redis：
 
 ```bash
 cp .env.docker.external.example .env.docker
-docker compose --env-file .env.docker up -d
+docker login 192.168.2.5:5050
+docker compose --env-file .env.docker pull
+docker compose --env-file .env.docker up -d --wait --remove-orphans
 ```
 
 Docker 网关默认监听宿主机 `0.0.0.0:6161`，公开地址、跨域来源和端口均通过
-`.env.docker` 配置，不绑定固定业务网址。
+`.env.docker` 配置，不绑定固定业务网址。生产 Compose 不包含源码构建步骤；
+需要切换到固定版本时，把 `XIANYU_IMAGE` 改为版本标签或完整提交 SHA。
 
 ## 配置文件
 

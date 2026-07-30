@@ -12,9 +12,12 @@ from tools.package.build import resolve_version
 
 
 class PackagingContractTests(unittest.TestCase):
-    def test_pipeline_only_builds_container_artifacts(self) -> None:
+    def test_pipeline_publishes_only_the_registry_image_from_tg_or_tags(self) -> None:
         root = Path(__file__).resolve().parents[1]
         pipeline = (root / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        common_jobs = (root / ".gitlab" / "ci" / "common.yml").read_text(
+            encoding="utf-8"
+        )
         docker_jobs = (root / ".gitlab" / "ci" / "docker.yml").read_text(
             encoding="utf-8"
         )
@@ -23,7 +26,12 @@ class PackagingContractTests(unittest.TestCase):
         self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
-        self.assertIn("archive-amd64:", docker_jobs)
+        self.assertNotIn("archive-amd64:", docker_jobs)
+        self.assertIn(".container-release:", common_jobs)
+        self.assertIn('$CI_COMMIT_BRANCH == "tg"', common_jobs)
+        self.assertNotIn("$CI_DEFAULT_BRANCH", common_jobs)
+        self.assertIn("$CI_REGISTRY_IMAGE:latest", docker_jobs)
+        self.assertNotIn("$CI_REGISTRY_IMAGE:edge", docker_jobs)
         self.assertIn(
             '--output "type=image,\\"name=$names\\",push=true"',
             docker_jobs,
@@ -62,6 +70,10 @@ class PackagingContractTests(unittest.TestCase):
         )
         dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
         self.assertIn("!apps/api/xianyu_admin_api/data/**", dockerignore)
+        entrypoint = (root / "tools" / "container_entry.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Path("/data/web-notification-sounds")', entrypoint)
 
     def test_container_deployment_has_no_fixed_public_origin(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -82,6 +94,53 @@ class PackagingContractTests(unittest.TestCase):
         )
         self.assertIn("COMPOSE_PROFILES=bundled", bundled)
         self.assertIn("COMPOSE_PROFILES=", external)
+        self.assertNotIn("\n    build:", compose)
+        self.assertEqual(compose.count("pull_policy: always"), 3)
+        self.assertEqual(compose.count("platform: linux/amd64"), 3)
+        self.assertEqual(
+            compose.count(
+                '${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}'
+            ),
+            3,
+        )
+        self.assertIn(
+            "web-notification-sounds:/data/web-notification-sounds",
+            compose,
+        )
+        self.assertIn(
+            'XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"',
+            compose,
+        )
+        self.assertIn("max-size: \"20m\"", compose)
+        self.assertIn("max-file: \"5\"", compose)
+        self.assertNotIn("BASE_IMAGE_PREFIX=", bundled)
+        self.assertNotIn("BASE_IMAGE_PREFIX=", external)
+
+    def test_gateway_limits_browser_archives_without_widening_general_api(
+        self,
+    ) -> None:
+        root = Path(__file__).resolve().parents[1]
+        configs = (
+            root / "deploy" / "nginx" / "xianyu-container.conf",
+            root / "deploy" / "nginx" / "xianyu-admin.conf",
+            root / "deploy" / "nginx" / "xianyu-admin-https.conf",
+        )
+
+        for config in configs:
+            with self.subTest(config=config.name):
+                contents = config.read_text(encoding="utf-8")
+                self.assertIn(
+                    "location = /api/settings/browser-runtime/standard/upload",
+                    contents,
+                )
+                self.assertIn(
+                    "location = /api/settings/browser-runtime/fingerprint/upload",
+                    contents,
+                )
+                self.assertEqual(contents.count("client_max_body_size 520m;"), 2)
+                self.assertEqual(contents.count("client_max_body_size 64m;"), 1)
+                self.assertEqual(contents.count("proxy_request_buffering off;"), 2)
+                self.assertGreaterEqual(contents.count("access_log off;"), 2)
 
     def test_source_runtime_and_resource_roots_are_stable(self) -> None:
         self.assertEqual(

@@ -4,11 +4,38 @@ x-application-environment: &application-environment
   XIANYU_DATABASE_URL: "${XIANYU_DATABASE_URL:?set XIANYU_DATABASE_URL in .env.docker}"
   XIANYU_REDIS_URL: "${XIANYU_REDIS_URL:?set XIANYU_REDIS_URL in .env.docker}"
   XIANYU_JWT_SECRET: "${XIANYU_JWT_SECRET:?set XIANYU_JWT_SECRET in .env.docker}"
+  XIANYU_JWT_EXPIRES_MINUTES: "${XIANYU_JWT_EXPIRES_MINUTES:-10080}"
   XIANYU_INTERNAL_API_URL: "http://api:8000"
   XIANYU_API_HEALTH_URL: "http://api:8000/api/health"
   XIANYU_PUBLIC_BASE_URL: "${XIANYU_PUBLIC_BASE_URL:-}"
   XIANYU_CORS_ORIGINS: "${XIANYU_CORS_ORIGINS:-}"
   XIANYU_CHATWOOT_CA_BUNDLE: "/etc/xianyu/ca/internal-root.crt"
+  XIANYU_COOKIE_RENEWAL_ENABLED: "${XIANYU_COOKIE_RENEWAL_ENABLED:-true}"
+  XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS: "${XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS:-1}"
+  XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS:-600}"
+  XIANYU_COOKIE_KEEPALIVE_RECHECK_MIN_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_RECHECK_MIN_SECONDS:-15}"
+  XIANYU_COOKIE_KEEPALIVE_RECHECK_MAX_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_RECHECK_MAX_SECONDS:-30}"
+  XIANYU_COOKIE_RENEWAL_SCAN_SECONDS: "${XIANYU_COOKIE_RENEWAL_SCAN_SECONDS:-60}"
+  XIANYU_COOKIE_RENEWAL_MANUAL_COOLDOWN_SECONDS: "${XIANYU_COOKIE_RENEWAL_MANUAL_COOLDOWN_SECONDS:-3600}"
+  XIANYU_CONVERSATION_SYNC_INTERVAL_SECONDS: "${XIANYU_CONVERSATION_SYNC_INTERVAL_SECONDS:-180}"
+  XIANYU_CHATWOOT_RECONCILE_INTERVAL_SECONDS: "${XIANYU_CHATWOOT_RECONCILE_INTERVAL_SECONDS:-900}"
+  XIANYU_CHATWOOT_READ_SYNC_INTERVAL_SECONDS: "${XIANYU_CHATWOOT_READ_SYNC_INTERVAL_SECONDS:-20}"
+  XIANYU_CONVERSATION_FULL_SYNC_MAX_PAGES: "${XIANYU_CONVERSATION_FULL_SYNC_MAX_PAGES:-50}"
+  XIANYU_QR_LOGIN_WORKERS: "${XIANYU_QR_LOGIN_WORKERS:-2}"
+  XIANYU_QR_LOGIN_MAX_ACTIVE_SESSIONS: "${XIANYU_QR_LOGIN_MAX_ACTIVE_SESSIONS:-4}"
+  XIANYU_RUNTIME_START_CONCURRENCY: "${XIANYU_RUNTIME_START_CONCURRENCY:-3}"
+  XIANYU_RUNTIME_START_JITTER_SECONDS: "${XIANYU_RUNTIME_START_JITTER_SECONDS:-3}"
+  XIANYU_CONVERSATION_SYNC_CONCURRENCY: "${XIANYU_CONVERSATION_SYNC_CONCURRENCY:-3}"
+  XIANYU_COOKIE_RENEWAL_CONCURRENCY: "${XIANYU_COOKIE_RENEWAL_CONCURRENCY:-2}"
+  XIANYU_WORKER_CONCURRENCY: "${XIANYU_WORKER_CONCURRENCY:-4}"
+  XIANYU_WORKER_LEASE_SECONDS: "${XIANYU_WORKER_LEASE_SECONDS:-120}"
+  XIANYU_WORKER_LEASE_RENEW_SECONDS: "${XIANYU_WORKER_LEASE_RENEW_SECONDS:-30}"
+  XIANYU_IM_VERIFICATION_SESSION_SECONDS: "${XIANYU_IM_VERIFICATION_SESSION_SECONDS:-600}"
+  XIANYU_ACCOUNT_BROWSER_IDLE_SECONDS: "${XIANYU_ACCOUNT_BROWSER_IDLE_SECONDS:-1800}"
+  XIANYU_ACCOUNT_BROWSER_MAX_SESSION_SECONDS: "${XIANYU_ACCOUNT_BROWSER_MAX_SESSION_SECONDS:-28800}"
+  XIANYU_ACCOUNT_BROWSER_MAX_SESSIONS: "${XIANYU_ACCOUNT_BROWSER_MAX_SESSIONS:-3}"
+  XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"
+  XIANYU_FINGERPRINT_BROWSER_MAX_EXTRACTED_BYTES: "1073741824"
 
 x-application-volumes: &application-volumes
   - product-images:/data/product-images
@@ -20,6 +47,12 @@ x-application-volumes: &application-volumes
     source: "${XIANYU_INTERNAL_CA_FILE:?set XIANYU_INTERNAL_CA_FILE in .env.docker}"
     target: /etc/xianyu/ca/internal-root.crt
     read_only: true
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
 
 services:
   mysql:
@@ -36,6 +69,9 @@ services:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-}"
     volumes:
       - mysql-data:/var/lib/mysql
+    networks:
+      - backend
+    logging: *default-logging
     healthcheck:
       test:
         - CMD-SHELL
@@ -43,6 +79,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
 
   redis:
     image: "${REDIS_IMAGE:-redis:7.4-alpine}"
@@ -59,6 +96,9 @@ services:
       - "${REDIS_PASSWORD:-xianyu-change-me}"
     volumes:
       - redis-data:/data
+    networks:
+      - backend
+    logging: *default-logging
     healthcheck:
       test:
         - CMD-SHELL
@@ -66,21 +106,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 10s
 
   api:
-    image: "${XIANYU_IMAGE:-xianyu-admin:local}"
-    build:
-      context: .
-      args:
-        BASE_IMAGE_PREFIX: "${BASE_IMAGE_PREFIX:-docker.io/library}"
-        BUILD_VERSION: "${XIANYU_VERSION:-development}"
-        BUILD_COMMIT: "${XIANYU_COMMIT:-unknown}"
+    image: "${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}"
+    pull_policy: always
+    platform: linux/amd64
     command:
       - api
     restart: unless-stopped
+    stop_grace_period: 60s
     environment:
       <<: *application-environment
     volumes: *application-volumes
+    networks:
+      - frontend
+      - backend
+    logging: *default-logging
     shm_size: 1gb
     depends_on:
       mysql:
@@ -98,24 +140,44 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
 
   worker:
-    image: "${XIANYU_IMAGE:-xianyu-admin:local}"
+    image: "${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}"
+    pull_policy: always
+    platform: linux/amd64
     command:
       - worker
     restart: unless-stopped
+    stop_grace_period: 120s
     environment:
       <<: *application-environment
     volumes: *application-volumes
+    networks:
+      - backend
+    logging: *default-logging
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import asyncio,sys; from apps.api.xianyu_admin_api.process_health import read_worker_heartbeat; state=asyncio.run(read_worker_heartbeat()); sys.exit(0 if state.get('online') else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   gateway:
-    image: "${XIANYU_IMAGE:-xianyu-admin:local}"
+    image: "${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}"
+    pull_policy: always
+    platform: linux/amd64
     command:
       - gateway
     restart: unless-stopped
+    stop_grace_period: 30s
     ports:
       - "${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"
     volumes:
@@ -123,6 +185,9 @@ services:
         source: "${XIANYU_TLS_DIR:?set XIANYU_TLS_DIR in .env.docker}"
         target: /run/secrets/xianyu-tls
         read_only: true
+    networks:
+      - frontend
+    logging: *default-logging
     depends_on:
       api:
         condition: service_healthy
@@ -135,6 +200,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 10s
+
+networks:
+  frontend:
+  backend:
 
 volumes:
   mysql-data:

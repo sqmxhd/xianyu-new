@@ -14,7 +14,6 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 variables:
-  PACKAGE_NAME: "xianyu-admin"
   PYTHON_IMAGE_TAG: "3.13-slim-bookworm"
   NODE_IMAGE_TAG: "20.19.2-bookworm-slim"
   BUILDKIT_IMAGE_TAG: "v0.24.0-rootless"

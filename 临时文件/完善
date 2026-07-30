@@ -8,4 +8,4 @@ archive-amd64
 状态：
 image-amd64
 
-archive-amd64是干嘛的 他的任务没有执行 会有影响吗
+现在这个文件名对吗？现在是 compose 点 yml，但是我看到很多这个 Docker 堆栈容器文件都是 docker-compose 点 yml。
