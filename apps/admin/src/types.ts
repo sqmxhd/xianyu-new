@@ -1617,3 +1617,16 @@ export interface ChatwootTestResult {
   message: string;
   status_code?: number | null;
 }
+
+export interface WebNotificationConfig {
+  config_id: string;
+  enabled: boolean;
+  has_custom_sound: boolean;
+  sound_filename?: string | null;
+  sound_mime_type?: string | null;
+  sound_size_bytes?: number | null;
+  sound_sha256?: string | null;
+  sound_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}

@@ -196,6 +196,10 @@ class Settings:
         "XIANYU_PRODUCT_IMAGE_DIR",
         str(runtime_path("data", "product-images")),
     )
+    web_notification_sound_dir: str = os.getenv(
+        "XIANYU_WEB_NOTIFICATION_SOUND_DIR",
+        str(runtime_path("data", "web-notification-sounds")),
+    )
     im_verification_browser_enabled: bool = env_bool(
         "XIANYU_IM_VERIFICATION_BROWSER_ENABLED", True
     )

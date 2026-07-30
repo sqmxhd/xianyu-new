@@ -329,7 +329,7 @@ body {
 }
 
 .chatwoot-config-form {
-  max-width: 980px;
+  max-width: 1080px;
 }
 
 .chatwoot-config-grid {
@@ -349,9 +349,149 @@ body {
 
 .chatwoot-config-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 16px;
   border-top: 1px solid #f0f0f0;
+}
+
+.message-services-page {
+  max-width: 1180px;
+}
+
+.message-service-section {
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid #eef0f3;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.message-service-section-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 14px;
+}
+
+.message-service-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.message-service-toggle-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid #e6e9ee;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.message-service-toggle-item > div:first-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+
+.message-service-toggle-item .ant-switch {
+  flex: 0 0 auto;
+}
+
+.message-service-fields {
+  margin-top: 14px;
+}
+
+.message-service-fields > .ant-form-item,
+.message-service-credential > .ant-form-item {
+  margin-bottom: 10px;
+}
+
+.message-service-readonly {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  gap: 8px;
+  padding: 4px 11px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.message-service-credential {
+  min-width: 0;
+}
+
+.message-service-clear-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff7e6;
+}
+
+.message-service-runtime {
+  margin-bottom: 16px;
+}
+
+.message-service-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.message-service-runtime-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.web-notification-settings {
+  display: flex;
+  flex-direction: column;
+  max-width: 1080px;
+  gap: 14px;
+}
+
+.web-notification-toggle {
+  width: 100%;
+}
+
+.web-notification-sound-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px;
+  border: 1px solid #e6e9ee;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.web-notification-sound-info {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  gap: 5px;
+}
+
+.web-notification-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
 }
 
 .browser-runtime-page {
@@ -365,6 +505,30 @@ body {
 
   .chatwoot-config-span-2 {
     grid-column: auto;
+  }
+
+  .message-service-toggle-grid,
+  .message-service-runtime-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .message-service-section {
+    padding: 12px;
+  }
+
+  .message-service-toggle-item,
+  .web-notification-sound-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .message-service-toggle-item {
+    width: 100%;
+  }
+
+  .web-notification-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 

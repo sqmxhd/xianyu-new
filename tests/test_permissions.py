@@ -57,6 +57,20 @@ class PermissionTests(unittest.TestCase):
         self.assertFalse(_has_permission(operator, _request("GET", "/api/users")))
         self.assertFalse(_has_permission(operator, _request("GET", "/api/audit-logs")))
 
+    def test_web_notification_playback_is_readable_but_configuration_is_admin_only(self) -> None:
+        operator = _user("operator")
+        viewer = _user("viewer")
+        self.assertTrue(_has_permission(operator, _request("GET", "/api/web-notification")))
+        self.assertTrue(
+            _has_permission(viewer, _request("GET", "/api/web-notification/sound"))
+        )
+        self.assertFalse(
+            _has_permission(
+                operator,
+                _request("PUT", "/api/settings/message-services/web-notification"),
+            )
+        )
+
     def test_viewer_cannot_reorder_accounts(self) -> None:
         viewer = _user("viewer")
         self.assertFalse(_has_permission(viewer, _request("PUT", "/api/accounts/order")))

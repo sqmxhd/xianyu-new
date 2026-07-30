@@ -46,6 +46,7 @@ Create the persistent product image directory before starting the services:
 
 ```bash
 sudo install -d -o xianyu -g xianyu /opt/xianyu/data/product-images
+sudo install -d -o xianyu -g xianyu /opt/xianyu/data/web-notification-sounds
 sudo install -d -m 700 -o xianyu -g xianyu /opt/xianyu/data/browser-profiles
 sudo install -d -m 755 -o xianyu -g xianyu /opt/xianyu/third_party/fingerprint-chromium
 ```
@@ -53,6 +54,12 @@ sudo install -d -m 755 -o xianyu -g xianyu /opt/xianyu/third_party/fingerprint-c
 Set `XIANYU_PRODUCT_IMAGE_DIR=/opt/xianyu/data/product-images` in the deployment
 environment. The API writes uploads there and the queue worker reads the same
 files while publishing, so both services must share this directory.
+
+Set
+`XIANYU_WEB_NOTIFICATION_SOUND_DIR=/opt/xianyu/data/web-notification-sounds`
+for the platform-wide browser message sound. API and worker containers should
+mount the same persistent directory so a custom uploaded sound survives image
+upgrades.
 
 Set `XIANYU_IM_VERIFICATION_PROFILE_DIR=/opt/xianyu/data/browser-profiles` for
 the platform-account, QR-login, and manual IM risk-verification browsers. The
@@ -186,5 +193,6 @@ Minimum production checks:
   `data/logs/watchdog.log`
 - MySQL backup: dump `xianyu_admin`
 - product image backup: include the directory configured by `XIANYU_PRODUCT_IMAGE_DIR`
+- custom browser sound backup: include `XIANYU_WEB_NOTIFICATION_SOUND_DIR`
 - env backup: store `.env.local` securely outside git
 - do not commit `node_modules`, `apps/admin/dist`, `.env.local`, or uploaded image files

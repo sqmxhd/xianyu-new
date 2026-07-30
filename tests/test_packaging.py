@@ -55,7 +55,8 @@ class PackagingContractTests(unittest.TestCase):
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("python -m tools.package.entry verify", dockerfile)
         self.assertIn(
-            'VOLUME ["/data/product-images", "/data/browser-profiles", '
+            'VOLUME ["/data/product-images", "/data/web-notification-sounds", '
+            '"/data/browser-profiles", '
             '"/data/fingerprint-chromium", "/data/standard-chromium"]',
             dockerfile,
         )

@@ -2129,6 +2129,23 @@ class ChatwootTestResultPayload(BaseModel):
     status_code: int | None = None
 
 
+class WebNotificationConfigPayload(BaseModel):
+    config_id: str = "default"
+    enabled: bool = True
+    has_custom_sound: bool = False
+    sound_filename: str | None = None
+    sound_mime_type: str | None = None
+    sound_size_bytes: int | None = None
+    sound_sha256: str | None = None
+    sound_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WebNotificationConfigUpdatePayload(BaseModel):
+    enabled: bool = True
+
+
 class ChatwootWebhookAcceptedPayload(BaseModel):
     accepted: bool = True
     duplicate: bool = False

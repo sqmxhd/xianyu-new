@@ -83,6 +83,7 @@ MAX_AUDIO_REDIRECTS = 3
 XIANYU_AUDIO_HOST_SUFFIXES = (".aliyuncs.com",)
 CHATWOOT_CONFIG_ID = "default"
 CHATWOOT_CALLBACK_PATH = "/api/integrations/chatwoot/webhook"
+CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION = False
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 CHATWOOT_OUTBOUND_AUDIO_UNSUPPORTED_MESSAGE = (
     "当前闲鱼通道仅支持从 Chatwoot 发送文字和图片；"
@@ -2076,6 +2077,20 @@ class ChatwootRepository:
                     ChatwootConversationORM.conversation_id == conversation_id,
                 )
             )
+            remote_row = session.scalar(
+                select(ChatwootConversationORM).where(
+                    ChatwootConversationORM.chatwoot_conversation_id
+                    == chatwoot_conversation_id
+                )
+            )
+            if remote_row is not None and (
+                remote_row.account_id != account_id
+                or remote_row.conversation_id != conversation_id
+            ):
+                raise ChatwootIntegrationError(
+                    f"Chatwoot 会话 {chatwoot_conversation_id} 已绑定闲鱼会话 "
+                    f"{remote_row.conversation_id}，不能重复绑定到 {conversation_id}"
+                )
             if row is None:
                 row = ChatwootConversationORM(
                     conversation_map_id=uuid.uuid4().hex,
@@ -2096,7 +2111,25 @@ class ChatwootRepository:
                     chatwoot_inbox_id or row.chatwoot_inbox_id
                 )
                 row.inbox_identifier = inbox_identifier or row.inbox_identifier
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                remote_row = session.scalar(
+                    select(ChatwootConversationORM).where(
+                        ChatwootConversationORM.chatwoot_conversation_id
+                        == chatwoot_conversation_id
+                    )
+                )
+                if remote_row is not None and (
+                    remote_row.account_id != account_id
+                    or remote_row.conversation_id != conversation_id
+                ):
+                    raise ChatwootIntegrationError(
+                        f"Chatwoot 会话 {chatwoot_conversation_id} 已绑定闲鱼会话 "
+                        f"{remote_row.conversation_id}，不能重复绑定到 {conversation_id}"
+                    ) from exc
+                raise
             return self._conversation_dict(row)
 
     def _record_message_map_sync(
@@ -2914,7 +2947,12 @@ async def _ensure_managed_account_inbox(
                     f"{config['chatwoot_inbox_id']}"
                 ),
                 token=token,
-                json_body={"name": desired_name},
+                json_body={
+                    "name": desired_name,
+                    "lock_to_single_conversation": (
+                        CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
+                    ),
+                },
             )
         config = dict(config)
         config["member_added"] = await _ensure_inbox_membership(config)
@@ -2972,7 +3010,9 @@ async def _ensure_managed_account_inbox(
             json_body={
                 "name": desired_name,
                 "enable_auto_assignment": False,
-                "lock_to_single_conversation": True,
+                "lock_to_single_conversation": (
+                    CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
+                ),
                 "channel": {
                     "type": "api",
                     "webhook_url": config["callback_url"],
@@ -2993,17 +3033,26 @@ async def _ensure_managed_account_inbox(
         raise ChatwootIntegrationError("Chatwoot 创建账号 Inbox 后未返回 Inbox ID")
     if (
         _string(remote.get("name")) != desired_name
-        or not remote.get("inbox_identifier")
+        or "lock_to_single_conversation" not in remote
+        or bool(remote.get("lock_to_single_conversation"))
+        != CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
+    ):
+        await run_external_blocking(
+            _chatwoot_request,
+            "PATCH",
+            f"{inboxes_url}/{remote_id}",
+            token=token,
+            json_body={
+                "name": desired_name,
+                "lock_to_single_conversation": (
+                    CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
+                ),
+            },
+        )
+    if (
+        not remote.get("inbox_identifier")
         or not remote.get("secret")
     ):
-        if _string(remote.get("name")) != desired_name:
-            await run_external_blocking(
-                _chatwoot_request,
-                "PATCH",
-                f"{inboxes_url}/{remote_id}",
-                token=token,
-                json_body={"name": desired_name},
-            )
         _, detail_body = await run_external_blocking(
             _chatwoot_request,
             "GET",

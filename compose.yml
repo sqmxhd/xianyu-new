@@ -12,6 +12,7 @@ x-application-environment: &application-environment
 
 x-application-volumes: &application-volumes
   - product-images:/data/product-images
+  - web-notification-sounds:/data/web-notification-sounds
   - browser-profiles:/data/browser-profiles
   - fingerprint-chromium:/data/fingerprint-chromium
   - standard-chromium:/data/standard-chromium
@@ -139,6 +140,7 @@ volumes:
   mysql-data:
   redis-data:
   product-images:
+  web-notification-sounds:
   browser-profiles:
   fingerprint-chromium:
   standard-chromium:

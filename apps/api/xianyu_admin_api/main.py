@@ -114,6 +114,8 @@ from .schemas import (
     ChatwootConfigUpdatePayload,
     ChatwootTestResultPayload,
     ChatwootWebhookAcceptedPayload,
+    WebNotificationConfigPayload,
+    WebNotificationConfigUpdatePayload,
     CookieRenewalStatusPayload,
     DeliveryAutomationSettingPayload,
     DeliveryAutomationSettingUpdatePayload,
@@ -224,6 +226,12 @@ from .order_action_service import (
 )
 from .product_regions import product_region_catalog
 from .store import AccountStore, ProxyAssignmentConflict
+from .web_notifications import (
+    MAX_WEB_NOTIFICATION_SOUND_BYTES,
+    WebNotificationRepository,
+    WebNotificationSoundError,
+    web_notification_sound_storage,
+)
 from .im_verification import (
     IMVerificationBusyError,
     IMVerificationError,
@@ -233,6 +241,7 @@ from .im_verification import (
 
 store = AccountStore()
 chatwoot_repository = ChatwootRepository(store.session_factory)
+web_notification_repository = WebNotificationRepository(store.session_factory)
 runtime_manager = AccountRuntimeManager(store)
 cookie_renewal_manager = CookieRenewalManager(store, runtime_manager)
 im_verification_manager = IMVerificationManager(
@@ -2399,6 +2408,85 @@ async def update_ai_provider_setting(
     payload: AIProviderSettingUpdatePayload,
 ) -> AIProviderSettingPayload:
     return await store.update_ai_provider_setting(payload)
+
+
+@app.get(
+    "/api/web-notification",
+    response_model=WebNotificationConfigPayload,
+)
+async def get_web_notification_config() -> WebNotificationConfigPayload:
+    """Expose safe playback settings to every authenticated web client."""
+
+    return await web_notification_repository.get_config()
+
+
+@app.get("/api/web-notification/sound")
+async def get_web_notification_sound() -> FileResponse:
+    record = await web_notification_repository.get_sound_record()
+    if record is None:
+        raise HTTPException(status_code=404, detail="custom notification sound not found")
+    sound_key, mime_type, filename = record
+    try:
+        path = web_notification_sound_storage.path(sound_key)
+    except WebNotificationSoundError as exc:
+        raise HTTPException(status_code=404, detail="custom notification sound not found") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="custom notification sound file is missing")
+    return FileResponse(
+        path,
+        media_type=mime_type,
+        filename=filename,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
+
+
+@app.put(
+    "/api/settings/message-services/web-notification",
+    response_model=WebNotificationConfigPayload,
+)
+async def update_web_notification_config(
+    payload: WebNotificationConfigUpdatePayload,
+) -> WebNotificationConfigPayload:
+    return await web_notification_repository.update_config(payload)
+
+
+@app.post(
+    "/api/settings/message-services/web-notification/sound",
+    response_model=WebNotificationConfigPayload,
+)
+async def upload_web_notification_sound(
+    sound: UploadFile = File(...),
+) -> WebNotificationConfigPayload:
+    try:
+        raw = await sound.read(MAX_WEB_NOTIFICATION_SOUND_BYTES + 1)
+    finally:
+        await sound.close()
+    if len(raw) > MAX_WEB_NOTIFICATION_SOUND_BYTES:
+        raise HTTPException(status_code=413, detail="铃声文件不能超过 5 MB")
+    try:
+        prepared = await run_media_blocking(
+            web_notification_sound_storage.save,
+            raw,
+            sound.filename,
+        )
+    except WebNotificationSoundError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    saved, previous_key = await web_notification_repository.set_sound(prepared)
+    if previous_key and previous_key != prepared.key:
+        await run_media_blocking(web_notification_sound_storage.delete, previous_key)
+    return saved
+
+
+@app.delete(
+    "/api/settings/message-services/web-notification/sound",
+    response_model=WebNotificationConfigPayload,
+)
+async def clear_web_notification_sound() -> WebNotificationConfigPayload:
+    saved, previous_key = await web_notification_repository.clear_sound()
+    if previous_key:
+        await run_media_blocking(web_notification_sound_storage.delete, previous_key)
+    return saved
 
 
 @app.get(

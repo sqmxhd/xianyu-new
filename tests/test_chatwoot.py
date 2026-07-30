@@ -955,6 +955,141 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         request.assert_not_called()
         self.assertEqual(unchanged["chatwoot_conversation_id"], "208")
 
+    async def test_same_contact_new_xianyu_conversation_gets_distinct_remote(
+        self,
+    ) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="https://chatwoot.internal",
+                inbox_identifier="legacy-inbox",
+                webhook_secret="legacy-webhook-secret",
+                chatwoot_account_id=3,
+                api_access_token="service-account-token",
+            )
+        )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="managed-webhook-secret",
+            label_id=None,
+            label_title=None,
+        )
+        contact = await self.repository.ensure_contact_map(
+            account_id=self.account.account_id,
+            peer_user_id="buyer-shared",
+            display_name="同一买家",
+            avatar_url=None,
+            chatwoot_contact_id="44",
+        )
+        await self.repository.create_conversation_map(
+            account_id=self.account.account_id,
+            conversation_id="conversation-old",
+            peer_user_id="buyer-shared",
+            source_id=str(contact["source_id"]),
+            chatwoot_conversation_id="20",
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+        )
+        await self.store.record_message(
+            account_id=self.account.account_id,
+            conversation_id="conversation-new",
+            direction="inbound",
+            message_type="text",
+            content="new conversation",
+            peer_user_id="buyer-shared",
+            peer_name="同一买家",
+        )
+        config = await self.repository.get_config(
+            account_id=self.account.account_id
+        )
+        context = await self.repository.get_local_conversation_context(
+            self.account.account_id,
+            "conversation-new",
+        )
+        assert config is not None
+        assert context is not None
+
+        def fake_request(
+            method: str,
+            url: str,
+            **kwargs: object,
+        ) -> tuple[int, object]:
+            if method == "POST" and url.endswith("/contacts"):
+                return 409, {}
+            if method == "PATCH" and "/contacts/" in url:
+                return 200, {}
+            if method == "GET" and url.endswith("/conversations"):
+                return 200, {
+                    "payload": [
+                        {
+                            "id": 20,
+                            "custom_attributes": {
+                                "source_conversation_id": "conversation-old",
+                            },
+                        }
+                    ]
+                }
+            if method == "POST" and url.endswith(
+                "/api/v1/accounts/3/conversations"
+            ):
+                body = kwargs["json_body"]
+                self.assertEqual(body["source_id"], contact["source_id"])
+                self.assertEqual(body["contact_id"], 44)
+                self.assertEqual(
+                    body["custom_attributes"]["source_conversation_id"],
+                    "conversation-new",
+                )
+                return 200, {"id": 21}
+            if method == "POST" and url.endswith(
+                "/conversations/21/custom_attributes"
+            ):
+                return 200, {}
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+            side_effect=fake_request,
+        ):
+            mapping = await _ensure_remote_conversation(
+                self.repository,
+                config,
+                context,
+            )
+
+        self.assertEqual(mapping["chatwoot_conversation_id"], "21")
+        self.assertEqual(mapping["source_id"], contact["source_id"])
+        old_mapping = await self.repository.get_conversation_map(
+            self.account.account_id,
+            "conversation-old",
+        )
+        assert old_mapping is not None
+        self.assertEqual(old_mapping["chatwoot_conversation_id"], "20")
+
+    async def test_remote_conversation_cannot_bind_two_xianyu_conversations(
+        self,
+    ) -> None:
+        await self.repository.create_conversation_map(
+            account_id=self.account.account_id,
+            conversation_id="conversation-old",
+            peer_user_id="buyer-shared",
+            source_id="source-shared",
+            chatwoot_conversation_id="20",
+        )
+
+        with self.assertRaisesRegex(
+            ChatwootIntegrationError,
+            "Chatwoot 会话 20 已绑定闲鱼会话 conversation-old",
+        ):
+            await self.repository.create_conversation_map(
+                account_id=self.account.account_id,
+                conversation_id="conversation-new",
+                peer_user_id="buyer-shared",
+                source_id="source-shared",
+                chatwoot_conversation_id="20",
+            )
+
     async def test_managed_inbox_and_account_label_are_created_once(self) -> None:
         await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
@@ -973,7 +1108,11 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         assert config is not None
         remote_label: dict[str, object] | None = None
 
-        def fake_request(method: str, url: str, **_: object) -> tuple[int, object]:
+        def fake_request(
+            method: str,
+            url: str,
+            **kwargs: object,
+        ) -> tuple[int, object]:
             nonlocal remote_label
             if method == "GET" and url.endswith("/profile"):
                 return 200, {"id": 21}
@@ -982,13 +1121,26 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             if method == "GET" and url.endswith("/inboxes"):
                 return 200, []
             if method == "POST" and url.endswith("/inboxes"):
+                self.assertFalse(
+                    kwargs["json_body"]["lock_to_single_conversation"]
+                )
                 return 200, {
                     "id": 9,
                     "name": "🔴 [闲鱼] chatwoot-test",
                     "channel_type": "Channel::Api",
                     "inbox_identifier": "managed-inbox",
                     "secret": "managed-webhook-secret",
+                    "lock_to_single_conversation": False,
                 }
+            if method == "PATCH" and url.endswith("/inboxes/9"):
+                self.assertEqual(
+                    kwargs["json_body"],
+                    {
+                        "name": "🔴 [闲鱼] chatwoot-test",
+                        "lock_to_single_conversation": False,
+                    },
+                )
+                return 200, {}
             if method == "GET" and url.endswith("/labels"):
                 return 200, {"payload": [remote_label] if remote_label else []}
             if method == "POST" and url.endswith("/labels"):
@@ -1014,6 +1166,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             again = await _ensure_managed_account_inbox(
                 self.repository,
                 resolved,
+                refresh_display_name=True,
             )
 
         self.assertTrue(resolved["managed_inbox"])
@@ -1026,6 +1179,15 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 1
                 for call in request.call_args_list
                 if call.args[0] == "POST" and call.args[1].endswith("/inboxes")
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                1
+                for call in request.call_args_list
+                if call.args[0] == "PATCH"
+                and call.args[1].endswith("/inboxes/9")
             ),
             1,
         )
@@ -1060,7 +1222,11 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         assert config is not None
 
-        def fake_request(method: str, url: str, **_: object) -> tuple[int, object]:
+        def fake_request(
+            method: str,
+            url: str,
+            **kwargs: object,
+        ) -> tuple[int, object]:
             if method == "GET" and url.endswith("/profile"):
                 return 200, {"id": 21}
             if method == "GET" and "/inbox_members/" in url:
@@ -1070,12 +1236,16 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             if method == "GET" and url.endswith("/inboxes"):
                 return 200, []
             if method == "POST" and url.endswith("/inboxes"):
+                self.assertFalse(
+                    kwargs["json_body"]["lock_to_single_conversation"]
+                )
                 return 200, {
                     "id": 9,
                     "name": "🔴 [闲鱼] chatwoot-test",
                     "channel_type": "Channel::Api",
                     "inbox_identifier": "managed-inbox",
                     "secret": "managed-webhook-secret",
+                    "lock_to_single_conversation": False,
                 }
             if url.endswith("/labels"):
                 raise ChatwootIntegrationError("Chatwoot API HTTP 500")

@@ -162,6 +162,8 @@ import {
   listAggregateConversations,
   listCachedMessages,
   getChatwootConfig,
+  getWebNotificationConfig,
+  getWebNotificationSound,
   getOrder,
   getPlatformBlacklist,
   listConversationOrders,
@@ -210,6 +212,7 @@ import {
   revealAccountCookie,
   sendText,
   saveChatwootConfig,
+  saveWebNotificationConfig,
   setManualTakeover,
   setPlatformBlacklist,
   startAccount,
@@ -237,6 +240,8 @@ import {
   updatePublishAddressGroup,
   uploadProductImage,
   uploadProductImageArchive,
+  uploadWebNotificationSound,
+  clearWebNotificationSound,
   getProductImageContent,
   updateProxy,
   completeIMVerification,
@@ -311,6 +316,7 @@ import type {
   ChatMessage,
   ChatwootConfig,
   ChatwootConfigFormValues,
+  WebNotificationConfig,
   Conversation,
   ConversationAccountSync,
   CookieRenewalStatus,
@@ -1332,6 +1338,26 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function playDefaultMessageDing(context: AudioContext) {
+  const startAt = context.currentTime + 0.01;
+  const playTone = (frequency: number, offset: number) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const toneAt = startAt + offset;
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, toneAt);
+    gain.gain.setValueAtTime(0.0001, toneAt);
+    gain.gain.exponentialRampToValueAtTime(0.22, toneAt + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, toneAt + 0.28);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(toneAt);
+    oscillator.stop(toneAt + 0.3);
+  };
+  playTone(880, 0);
+  playTone(660, 0.18);
+}
+
 function rawRenderItemIdLink(itemId?: string | null, itemUrl?: string | null) {
   if (!itemId) return "-";
   const normalizedUrl = itemUrl?.trim();
@@ -1701,6 +1727,12 @@ export default function App() {
   const [chatwootSaving, setChatwootSaving] = useState(false);
   const [chatwootTesting, setChatwootTesting] = useState(false);
   const [chatwootAlertTesting, setChatwootAlertTesting] = useState(false);
+  const [webNotificationConfig, setWebNotificationConfig] =
+    useState<WebNotificationConfig | null>(null);
+  const [webNotificationLoading, setWebNotificationLoading] = useState(false);
+  const [webNotificationSaving, setWebNotificationSaving] = useState(false);
+  const [webNotificationUploading, setWebNotificationUploading] = useState(false);
+  const [webNotificationUnlocked, setWebNotificationUnlocked] = useState(false);
   const [loading, setLoading] = useState(false);
   const [recoveringAccountId, setRecoveringAccountId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1845,6 +1877,12 @@ export default function App() {
   const realtimeConnectedRef = useRef(false);
   const realtimeLastEventAtRef = useRef(0);
   const workspaceBootstrappedRef = useRef(false);
+  const webNotificationConfigRef = useRef<WebNotificationConfig | null>(null);
+  const webNotificationAudioContextRef = useRef<AudioContext | null>(null);
+  const webNotificationAudioBytesRef = useRef<ArrayBuffer | null>(null);
+  const webNotificationAudioBufferRef = useRef<AudioBuffer | null>(null);
+  const webNotificationAudioLoadRef = useRef(0);
+  const notifiedMessageIdsRef = useRef(new Map<string, number>());
   const [chatMessagesLoading, setChatMessagesLoading] = useState(false);
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
@@ -2829,6 +2867,162 @@ export default function App() {
     selectedConversation?.conversation_id
   ]);
 
+  function getWebNotificationAudioContext(): AudioContext | null {
+    if (webNotificationAudioContextRef.current) {
+      return webNotificationAudioContextRef.current;
+    }
+    if (typeof window === "undefined" || !window.AudioContext) {
+      return null;
+    }
+    const context = new window.AudioContext();
+    webNotificationAudioContextRef.current = context;
+    return context;
+  }
+
+  async function decodeWebNotificationSound() {
+    const context = getWebNotificationAudioContext();
+    const bytes = webNotificationAudioBytesRef.current;
+    if (!context || !bytes) {
+      webNotificationAudioBufferRef.current = null;
+      return;
+    }
+    try {
+      webNotificationAudioBufferRef.current = await context.decodeAudioData(bytes.slice(0));
+    } catch {
+      webNotificationAudioBufferRef.current = null;
+    }
+  }
+
+  async function applyWebNotificationConfig(config: WebNotificationConfig) {
+    webNotificationConfigRef.current = config;
+    setWebNotificationConfig(config);
+    const loadId = webNotificationAudioLoadRef.current + 1;
+    webNotificationAudioLoadRef.current = loadId;
+    webNotificationAudioBytesRef.current = null;
+    webNotificationAudioBufferRef.current = null;
+    if (!config.has_custom_sound || !config.sound_url) {
+      return;
+    }
+    try {
+      const blob = await getWebNotificationSound();
+      const bytes = await blob.arrayBuffer();
+      if (webNotificationAudioLoadRef.current !== loadId) {
+        return;
+      }
+      webNotificationAudioBytesRef.current = bytes;
+      await decodeWebNotificationSound();
+    } catch {
+      // A missing or browser-incompatible custom file falls back to the built-in ding.
+    }
+  }
+
+  async function loadWebNotificationData(showError = false) {
+    setWebNotificationLoading(true);
+    try {
+      await applyWebNotificationConfig(await getWebNotificationConfig());
+    } catch (error) {
+      if (showError) {
+        message.error(error instanceof Error ? error.message : "加载网页铃声配置失败");
+      }
+    } finally {
+      setWebNotificationLoading(false);
+    }
+  }
+
+  function playWebNotificationSound(force = false) {
+    const config = webNotificationConfigRef.current;
+    if (!config || (!force && !config.enabled)) {
+      return;
+    }
+    const context = webNotificationAudioContextRef.current;
+    if (!context || context.state !== "running") {
+      setWebNotificationUnlocked(false);
+      return;
+    }
+    const buffer = webNotificationAudioBufferRef.current;
+    if (config.has_custom_sound && buffer) {
+      const source = context.createBufferSource();
+      const gain = context.createGain();
+      gain.gain.value = 0.9;
+      source.buffer = buffer;
+      source.connect(gain);
+      gain.connect(context.destination);
+      source.start();
+      return;
+    }
+    playDefaultMessageDing(context);
+  }
+
+  function notifyForInboundMessage(next: ChatMessage) {
+    if (
+      next.direction !== "inbound" ||
+      next.message_type === "system" ||
+      next.recalled_at ||
+      !webNotificationConfigRef.current?.enabled
+    ) {
+      return;
+    }
+    const account = accountsRef.current.find((item) => item.account_id === next.account_id);
+    if (account && (!account.enabled || !account.conversation_visible)) {
+      return;
+    }
+    const now = Date.now();
+    const notified = notifiedMessageIdsRef.current;
+    if (notified.has(next.message_pk)) {
+      return;
+    }
+    notified.set(next.message_pk, now);
+    if (notified.size > 500) {
+      for (const [messagePk, notifiedAt] of notified) {
+        if (now - notifiedAt > 10 * 60 * 1000) {
+          notified.delete(messagePk);
+        }
+      }
+    }
+    playWebNotificationSound();
+  }
+
+  useEffect(() => {
+    if (!authenticated) {
+      webNotificationConfigRef.current = null;
+      setWebNotificationConfig(null);
+      return undefined;
+    }
+    void loadWebNotificationData();
+    const unlockAudio = () => {
+      const context = getWebNotificationAudioContext();
+      if (!context) {
+        return;
+      }
+      void context
+        .resume()
+        .then(async () => {
+          if (
+            webNotificationAudioBytesRef.current &&
+            !webNotificationAudioBufferRef.current
+          ) {
+            await decodeWebNotificationSound();
+          }
+          setWebNotificationUnlocked(context.state === "running");
+        })
+        .catch(() => setWebNotificationUnlocked(false));
+    };
+    window.addEventListener("pointerdown", unlockAudio, { capture: true });
+    window.addEventListener("keydown", unlockAudio, { capture: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio, { capture: true });
+      window.removeEventListener("keydown", unlockAudio, { capture: true });
+      notifiedMessageIdsRef.current.clear();
+      webNotificationAudioBytesRef.current = null;
+      webNotificationAudioBufferRef.current = null;
+      const context = webNotificationAudioContextRef.current;
+      webNotificationAudioContextRef.current = null;
+      if (context) {
+        void context.close();
+      }
+    };
+  }, [authenticated]);
+
   useEffect(() => {
     if (!authenticated) {
       return undefined;
@@ -3067,6 +3261,7 @@ export default function App() {
           }
           if (event.event === "message_upsert" && event.data) {
             const next = event.data as ChatMessage;
+            notifyForInboundMessage(next);
             const selected = selectedConversationRef.current;
             if (
               selected &&
@@ -3220,6 +3415,7 @@ export default function App() {
       if (tab === "browsers") void loadBrowserRuntime();
       if (tab === "message-services") {
         void loadChatwootData();
+        void loadWebNotificationData(true);
       }
       if (tab === "audit") void loadAuditLogs();
       if (tab === "ai") void loadAIProviderData();
@@ -5303,6 +5499,73 @@ export default function App() {
     } finally {
       setChatwootLoading(false);
     }
+  }
+
+  async function setWebNotificationEnabled(enabled: boolean) {
+    setWebNotificationSaving(true);
+    try {
+      await applyWebNotificationConfig(await saveWebNotificationConfig(enabled));
+      message.success(enabled ? "网页客户消息铃声已启用" : "网页客户消息铃声已关闭");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "保存网页铃声配置失败");
+    } finally {
+      setWebNotificationSaving(false);
+    }
+  }
+
+  async function handleWebNotificationSoundUpload(file: File) {
+    setWebNotificationUploading(true);
+    try {
+      const saved = await uploadWebNotificationSound(file);
+      await applyWebNotificationConfig(saved);
+      message.success("网页消息铃声已更新");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "上传网页消息铃声失败");
+    } finally {
+      setWebNotificationUploading(false);
+    }
+  }
+
+  async function previewWebNotificationSound() {
+    const context = getWebNotificationAudioContext();
+    if (!context) {
+      message.warning("当前浏览器不支持网页音频提醒");
+      return;
+    }
+    try {
+      await context.resume();
+      if (
+        webNotificationAudioBytesRef.current &&
+        !webNotificationAudioBufferRef.current
+      ) {
+        await decodeWebNotificationSound();
+      }
+      setWebNotificationUnlocked(context.state === "running");
+      playWebNotificationSound(true);
+    } catch {
+      message.warning("浏览器尚未允许播放声音，请先点击页面后再试听");
+    }
+  }
+
+  function confirmClearWebNotificationSound() {
+    Modal.confirm({
+      title: "恢复默认叮咚铃声",
+      content: "已上传的自定义铃声会被删除，网页端将改用内置的叮咚提示音。",
+      okText: "恢复默认",
+      cancelText: "取消",
+      async onOk() {
+        setWebNotificationUploading(true);
+        try {
+          await applyWebNotificationConfig(await clearWebNotificationSound());
+          message.success("已恢复默认叮咚铃声");
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "恢复默认铃声失败");
+          throw error;
+        } finally {
+          setWebNotificationUploading(false);
+        }
+      }
+    });
   }
 
   async function saveChatwootConfiguration() {
@@ -12848,14 +13111,14 @@ export default function App() {
         ? "red"
         : chatwootConfig?.status === "degraded"
           ? "orange"
-        : chatwootConfig?.status === "online" || chatwootConfig?.status === "ready"
-          ? "blue"
-          : "default";
+          : chatwootConfig?.status === "online" || chatwootConfig?.status === "ready"
+            ? "blue"
+            : "default";
     return (
-      <Space direction="vertical" size={12} className="content-stack">
+      <Space direction="vertical" size={16} className="content-stack message-services-page">
         <Card
           title={
-            <Space size={6} wrap>
+            <Space size={8} wrap>
               <span>Chatwoot</span>
               <Tag color="blue">平台级</Tag>
               {chatwootConfig ? (
@@ -12864,17 +13127,6 @@ export default function App() {
                     {chatwootConfig.enabled ? "已启用" : "已停用"}
                   </Tag>
                   <Tag color={chatwootStatusColor}>{chatwootConfig.status}</Tag>
-                  <Tag color={chatwootConfig.full_outbound_sync_enabled ? "green" : "orange"}>
-                    {chatwootConfig.full_outbound_sync_enabled ? "完整回写" : "基础链路"}
-                  </Tag>
-                  <Tag color={chatwootConfig.account_grouping_enabled ? "green" : "orange"}>
-                    {chatwootConfig.account_grouping_enabled
-                      ? `账号分组 ${chatwootConfig.managed_inbox_count}`
-                      : "账号分组待凭据"}
-                  </Tag>
-                  <Tag>
-                    {accounts.filter((account) => account.chat_enabled).length} 个账户开启 Chat
-                  </Tag>
                 </>
               ) : (
                 <Tag color="orange">尚未配置</Tag>
@@ -12885,7 +13137,10 @@ export default function App() {
           extra={
             <Button
               icon={<SyncOutlined />}
-              onClick={() => void loadChatwootData()}
+              onClick={() => {
+                void loadChatwootData();
+                void loadWebNotificationData(true);
+              }}
             >
               刷新
             </Button>
@@ -12903,141 +13158,205 @@ export default function App() {
               clear_api_access_token: false
             }}
           >
-            <div className="chatwoot-config-grid">
-              <Form.Item
-                name="enabled"
-                label="启用 Chatwoot"
-                valuePropName="checked"
-              >
-                <Switch checkedChildren="已启用" unCheckedChildren="已停用" />
-              </Form.Item>
-              <Form.Item
-                name="account_alerts_enabled"
-                label="账户状态提醒"
-                valuePropName="checked"
-                extra="平台级统一配置；Cookie 确认失效、IM 持续掉线及恢复会作为 Chatwoot 入站事件推送"
-              >
-                <Switch checkedChildren="已启用" unCheckedChildren="已停用" />
-              </Form.Item>
-              <Form.Item
-                name="offline_alert_delay_seconds"
-                label="IM 掉线提醒延迟"
-                extra="短时网络抖动不会立即通知；Cookie 确认失效不受此延迟影响"
-                rules={[{ required: true, message: "请输入掉线提醒延迟" }]}
-              >
-                <InputNumber
-                  min={30}
-                  max={3600}
-                  precision={0}
-                  addonAfter="秒"
-                  style={{ width: "100%" }}
-                />
-              </Form.Item>
-              <Form.Item label="当前链路">
-                <Space size={6} wrap className="chatwoot-config-status">
-                  <Tag color={chatwootConfig?.has_webhook_secret ? "green" : "red"}>
-                    Webhook {chatwootConfig?.has_webhook_secret ? "已配置" : "未配置"}
-                  </Tag>
-                  <Tag color={chatwootConfig?.full_outbound_sync_enabled ? "green" : "orange"}>
-                    {chatwootConfig?.full_outbound_sync_enabled ? "完整双向同步" : "基础链路"}
-                  </Tag>
-                  <Tag color={chatwootConfig?.account_grouping_enabled ? "green" : "orange"}>
-                    {chatwootConfig?.account_grouping_enabled
-                      ? `${chatwootConfig?.managed_inbox_count ?? 0} 个账号 Inbox`
-                      : "账号分组待凭据"}
-                  </Tag>
-                </Space>
-              </Form.Item>
-              <Form.Item
-                name="base_url"
-                label="Chatwoot 地址"
-                rules={[{ required: true, message: "请输入 Chatwoot 地址" }]}
-              >
-                <Input placeholder="https://192.168.201.2" />
-              </Form.Item>
-              <Form.Item
-                name="inbox_identifier"
-                label="收件箱标识符"
-                rules={[{ required: true, message: "请输入 API Inbox 标识符" }]}
-              >
-                <Input />
-              </Form.Item>
-              <Form.Item
-                name="callback_url"
-                label="Webhook 地址"
-                className="chatwoot-config-span-2"
-                extra="在 Chatwoot API Inbox 中填写此回调地址"
-                rules={[
-                  { required: true, message: "请输入 Webhook 地址" },
-                  { type: "url", message: "请输入完整的 http:// 或 https:// 地址" }
-                ]}
-              >
-                <Input
-                  placeholder="https://192.168.2.3/api/integrations/chatwoot/webhook"
-                  suffix={
-                    chatwootCallbackUrlValue ? (
-                      <Text copyable={{ text: chatwootCallbackUrlValue }} />
-                    ) : null
-                  }
-                />
-              </Form.Item>
-              <Form.Item
-                name="webhook_secret"
-                label="Webhook 秘密"
-                extra="管理页面直接显示；服务端数据库仍加密存储"
-                rules={[
-                  {
-                    validator: (_, value) =>
-                      value
-                        ? Promise.resolve()
-                        : Promise.reject(new Error("请输入 Webhook 秘密"))
-                  }
-                ]}
-              >
-                <Input autoComplete="off" />
-              </Form.Item>
-              <Form.Item
-                name="client_hmac_token"
-                label="客户端身份 HMAC Token"
-                extra="可选，仅在 Chatwoot API Inbox 启用身份验证时填写"
-              >
-                <Input autoComplete="off" />
-              </Form.Item>
-              {chatwootConfig?.has_client_hmac_token ? (
+            <div className="message-service-section">
+              <div className="message-service-section-heading">
+                <Text strong>功能与提醒</Text>
+                <Text type="secondary">控制 Chatwoot 主链路和账户异常提醒</Text>
+              </div>
+              <div className="message-service-toggle-grid">
+                <div className="message-service-toggle-item">
+                  <div>
+                    <Text strong>启用 Chatwoot</Text>
+                    <Text type="secondary">闲鱼消息与 Chatwoot 双向同步</Text>
+                  </div>
+                  <Form.Item name="enabled" valuePropName="checked" noStyle>
+                    <Switch checkedChildren="启用" unCheckedChildren="停用" />
+                  </Form.Item>
+                </div>
+                <div className="message-service-toggle-item">
+                  <div>
+                    <Text strong>账户状态提醒</Text>
+                    <Text type="secondary">Cookie 失效、IM 掉线与恢复推送到 Chatwoot</Text>
+                  </div>
+                  <Form.Item name="account_alerts_enabled" valuePropName="checked" noStyle>
+                    <Switch checkedChildren="启用" unCheckedChildren="停用" />
+                  </Form.Item>
+                </div>
+              </div>
+              <div className="chatwoot-config-grid message-service-fields">
                 <Form.Item
-                  name="clear_client_hmac_token"
-                  label="清除客户端 HMAC Token"
-                  valuePropName="checked"
+                  name="offline_alert_delay_seconds"
+                  label="IM 掉线提醒延迟"
+                  extra="过滤短时网络抖动；Cookie 确认失效不受此延迟影响"
+                  rules={[{ required: true, message: "请输入掉线提醒延迟" }]}
                 >
-                  <Switch checkedChildren="保存时清除" unCheckedChildren="保留" />
+                  <InputNumber
+                    min={30}
+                    max={3600}
+                    precision={0}
+                    addonAfter="秒"
+                    style={{ width: "100%" }}
+                  />
                 </Form.Item>
-              ) : null}
-              <Form.Item name="chatwoot_account_id" label="Chatwoot 平台账户 ID">
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-              <Form.Item
-                name="api_access_token"
-                label="专用服务账号令牌"
-                extra="账号标签、手机端账号分组、在线状态及自动创建账号 Inbox 必填；请使用 Chatwoot 管理员专用服务账号"
-              >
-                <Input autoComplete="off" />
-              </Form.Item>
-              {chatwootConfig?.has_api_access_token ? (
-                <Form.Item
-                  name="clear_api_access_token"
-                  label="清除服务账号令牌"
-                  valuePropName="checked"
-                >
-                  <Switch checkedChildren="保存时清除" unCheckedChildren="保留" />
+                <Form.Item label="当前链路">
+                  <Space size={6} wrap className="chatwoot-config-status">
+                    <Tag color={chatwootConfig?.has_webhook_secret ? "green" : "red"}>
+                      Webhook {chatwootConfig?.has_webhook_secret ? "已配置" : "未配置"}
+                    </Tag>
+                    <Tag color={chatwootConfig?.full_outbound_sync_enabled ? "green" : "orange"}>
+                      {chatwootConfig?.full_outbound_sync_enabled ? "完整双向同步" : "基础链路"}
+                    </Tag>
+                    <Tag color={chatwootConfig?.account_grouping_enabled ? "green" : "orange"}>
+                      {chatwootConfig?.account_grouping_enabled
+                        ? `${chatwootConfig?.managed_inbox_count ?? 0} 个账号 Inbox`
+                        : "账号分组待凭据"}
+                    </Tag>
+                  </Space>
                 </Form.Item>
-              ) : null}
-              <Form.Item label="同步记录">
-                <Space direction="vertical" size={2}>
-                  <Text type="secondary">最近推送：{formatTime(chatwootConfig?.last_push_at)}</Text>
-                  <Text type="secondary">最近回调：{formatTime(chatwootConfig?.last_webhook_at)}</Text>
-                </Space>
-              </Form.Item>
+              </div>
             </div>
+
+            <div className="message-service-section">
+              <div className="message-service-section-heading">
+                <Text strong>连接参数</Text>
+                <Text type="secondary">Chatwoot 地址、收件箱和回调入口</Text>
+              </div>
+              <div className="chatwoot-config-grid message-service-fields">
+                <Form.Item
+                  name="base_url"
+                  label="Chatwoot 地址"
+                  rules={[{ required: true, message: "请输入 Chatwoot 地址" }]}
+                >
+                  <Input placeholder="https://192.168.201.2" />
+                </Form.Item>
+                <Form.Item name="chatwoot_account_id" label="Chatwoot 平台账户 ID">
+                  <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+                </Form.Item>
+                <Form.Item
+                  name="inbox_identifier"
+                  label="收件箱标识符"
+                  rules={[{ required: true, message: "请输入 API Inbox 标识符" }]}
+                >
+                  <Input />
+                </Form.Item>
+                <Form.Item label="账户范围">
+                  <div className="message-service-readonly">
+                    <Text>
+                      {accounts.filter((account) => account.chat_enabled).length} 个账户开启 Chat
+                    </Text>
+                    <Text type="secondary">
+                      {chatwootConfig?.managed_inbox_count ?? 0} 个托管 Inbox
+                    </Text>
+                  </div>
+                </Form.Item>
+                <Form.Item
+                  name="callback_url"
+                  label="Webhook 地址"
+                  className="chatwoot-config-span-2"
+                  extra="在 Chatwoot API Inbox 中填写此回调地址"
+                  rules={[
+                    { required: true, message: "请输入 Webhook 地址" },
+                    { type: "url", message: "请输入完整的 http:// 或 https:// 地址" }
+                  ]}
+                >
+                  <Input
+                    placeholder="https://192.168.2.3/api/integrations/chatwoot/webhook"
+                    suffix={
+                      chatwootCallbackUrlValue ? (
+                        <Text copyable={{ text: chatwootCallbackUrlValue }} />
+                      ) : null
+                    }
+                  />
+                </Form.Item>
+              </div>
+            </div>
+
+            <div className="message-service-section">
+              <div className="message-service-section-heading">
+                <Text strong>安全凭据</Text>
+                <Text type="secondary">凭据在服务端加密存储，留空不会覆盖已有值</Text>
+              </div>
+              <div className="chatwoot-config-grid message-service-fields">
+                <Form.Item
+                  name="webhook_secret"
+                  label="Webhook 秘密"
+                  rules={[
+                    {
+                      validator: (_, value) =>
+                        value
+                          ? Promise.resolve()
+                          : Promise.reject(new Error("请输入 Webhook 秘密"))
+                    }
+                  ]}
+                >
+                  <Input.Password autoComplete="new-password" />
+                </Form.Item>
+                <div className="message-service-credential">
+                  <Form.Item
+                    name="client_hmac_token"
+                    label="客户端身份 HMAC Token"
+                    extra="仅在 Chatwoot API Inbox 启用身份验证时填写"
+                  >
+                    <Input.Password autoComplete="new-password" />
+                  </Form.Item>
+                  {chatwootConfig?.has_client_hmac_token ? (
+                    <div className="message-service-clear-control">
+                      <Text type="secondary">保存时清除现有 HMAC Token</Text>
+                      <Form.Item
+                        name="clear_client_hmac_token"
+                        valuePropName="checked"
+                        noStyle
+                      >
+                        <Switch size="small" />
+                      </Form.Item>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="message-service-credential chatwoot-config-span-2">
+                  <Form.Item
+                    name="api_access_token"
+                    label="专用服务账号令牌"
+                    extra="账号标签、手机端账号分组、在线状态及自动创建账号 Inbox 必填"
+                  >
+                    <Input.Password autoComplete="new-password" />
+                  </Form.Item>
+                  {chatwootConfig?.has_api_access_token ? (
+                    <div className="message-service-clear-control">
+                      <Text type="secondary">保存时清除现有服务账号令牌</Text>
+                      <Form.Item
+                        name="clear_api_access_token"
+                        valuePropName="checked"
+                        noStyle
+                      >
+                        <Switch size="small" />
+                      </Form.Item>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="message-service-section message-service-runtime">
+              <div className="message-service-section-heading">
+                <Text strong>运行记录</Text>
+                <Text type="secondary">用于快速判断双向链路是否持续活跃</Text>
+              </div>
+              <div className="message-service-runtime-grid">
+                <div>
+                  <Text type="secondary">最近推送</Text>
+                  <Text>{formatTime(chatwootConfig?.last_push_at)}</Text>
+                </div>
+                <div>
+                  <Text type="secondary">最近回调</Text>
+                  <Text>{formatTime(chatwootConfig?.last_webhook_at)}</Text>
+                </div>
+                <div>
+                  <Text type="secondary">配置更新时间</Text>
+                  <Text>{formatTime(chatwootConfig?.updated_at)}</Text>
+                </div>
+              </div>
+            </div>
+
             <div className="chatwoot-config-actions">
               <Button
                 type="primary"
@@ -13075,6 +13394,105 @@ export default function App() {
             description={chatwootConfig.last_error}
           />
         ) : null}
+        <Card
+          title={
+            <Space size={8} wrap>
+              <span>网页客户消息铃声</span>
+              <Tag color="purple">仅本项目网页端</Tag>
+              <Tag color={webNotificationConfig?.enabled ? "green" : "default"}>
+                {webNotificationConfig?.enabled ? "已启用" : "已关闭"}
+              </Tag>
+            </Space>
+          }
+          loading={webNotificationLoading}
+        >
+          <div className="web-notification-settings">
+            <Alert
+              type="info"
+              showIcon
+              message="Chatwoot 使用它自己的通知设置"
+              description="这里的铃声只在本项目网页收到新的客户入站消息时播放，不会修改或重复接管 Chatwoot 的手机端和网页端通知。"
+            />
+            <div className="message-service-toggle-item web-notification-toggle">
+              <div>
+                <Text strong>客户消息叮咚提醒</Text>
+                <Text type="secondary">
+                  只提醒实时新消息；历史同步、自己发送和系统消息不会播放
+                </Text>
+              </div>
+              <Switch
+                checked={Boolean(webNotificationConfig?.enabled)}
+                loading={webNotificationSaving}
+                checkedChildren="启用"
+                unCheckedChildren="关闭"
+                onChange={(checked) => void setWebNotificationEnabled(checked)}
+              />
+            </div>
+            <div className="web-notification-sound-row">
+              <div className="web-notification-sound-info">
+                <Space size={8} wrap>
+                  <Text strong>当前铃声</Text>
+                  <Tag color={webNotificationConfig?.has_custom_sound ? "blue" : "default"}>
+                    {webNotificationConfig?.has_custom_sound ? "自定义" : "内置叮咚"}
+                  </Tag>
+                  <Tag color={webNotificationUnlocked ? "green" : "orange"}>
+                    {webNotificationUnlocked ? "浏览器已允许播放" : "点击页面后可播放"}
+                  </Tag>
+                </Space>
+                <Text type="secondary">
+                  {webNotificationConfig?.has_custom_sound
+                    ? `${webNotificationConfig.sound_filename || "自定义铃声"} · ${
+                        webNotificationConfig.sound_size_bytes != null
+                          ? formatBytes(webNotificationConfig.sound_size_bytes)
+                          : "未知大小"
+                      }`
+                    : "使用项目内置的双音“叮咚”提示，不依赖外部音频文件"}
+                </Text>
+                {webNotificationConfig?.updated_at ? (
+                  <Text type="secondary">
+                    最近更新：{formatTime(webNotificationConfig.updated_at)}
+                  </Text>
+                ) : null}
+              </div>
+              <Space size={8} wrap className="web-notification-actions">
+                <Button
+                  icon={<PlayCircleOutlined />}
+                  disabled={!webNotificationConfig}
+                  onClick={() => void previewWebNotificationSound()}
+                >
+                  试听
+                </Button>
+                <Upload
+                  accept=".mp3,.wav,.ogg,.m4a,audio/mpeg,audio/wav,audio/ogg,audio/mp4"
+                  showUploadList={false}
+                  disabled={webNotificationUploading}
+                  beforeUpload={(file) => {
+                    void handleWebNotificationSoundUpload(file);
+                    return false;
+                  }}
+                >
+                  <Button
+                    icon={<UploadOutlined />}
+                    loading={webNotificationUploading}
+                  >
+                    {webNotificationConfig?.has_custom_sound ? "更换铃声" : "上传铃声"}
+                  </Button>
+                </Upload>
+                {webNotificationConfig?.has_custom_sound ? (
+                  <Button
+                    disabled={webNotificationUploading}
+                    onClick={confirmClearWebNotificationSound}
+                  >
+                    恢复默认
+                  </Button>
+                ) : null}
+              </Space>
+            </div>
+            <Text type="secondary">
+              支持 MP3、WAV、OGG、M4A，最大 5 MB。浏览器为防止网页自动发声，登录后至少需要点击页面一次。
+            </Text>
+          </div>
+        </Card>
       </Space>
     );
   }

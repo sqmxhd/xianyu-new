@@ -27,6 +27,7 @@ import type {
   ChatwootConfig,
   ChatwootConfigFormValues,
   ChatwootTestResult,
+  WebNotificationConfig,
   Conversation,
   ConversationPage,
   CookieRenewalStatus,
@@ -207,6 +208,45 @@ export function testChatwootAccountAlerts(): Promise<ChatwootTestResult> {
     "/api/settings/message-services/chatwoot/account-alert-test",
     { method: "POST" }
   );
+}
+
+export function getWebNotificationConfig(): Promise<WebNotificationConfig> {
+  return request<WebNotificationConfig>("/api/web-notification");
+}
+
+export function saveWebNotificationConfig(
+  enabled: boolean
+): Promise<WebNotificationConfig> {
+  return request<WebNotificationConfig>(
+    "/api/settings/message-services/web-notification",
+    {
+      method: "PUT",
+      body: JSON.stringify({ enabled })
+    }
+  );
+}
+
+export function uploadWebNotificationSound(file: File): Promise<WebNotificationConfig> {
+  const form = new FormData();
+  form.append("sound", file);
+  return request<WebNotificationConfig>(
+    "/api/settings/message-services/web-notification/sound",
+    {
+      method: "POST",
+      body: form
+    }
+  );
+}
+
+export function clearWebNotificationSound(): Promise<WebNotificationConfig> {
+  return request<WebNotificationConfig>(
+    "/api/settings/message-services/web-notification/sound",
+    { method: "DELETE" }
+  );
+}
+
+export function getWebNotificationSound(): Promise<Blob> {
+  return requestBlob("/api/web-notification/sound");
 }
 
 export function reorderAccounts(accountIds: string[]): Promise<Account[]> {

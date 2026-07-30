@@ -1801,6 +1801,28 @@ class ChatwootConfigORM(Base):
     )
 
 
+class WebNotificationConfigORM(Base):
+    """Platform-wide browser notification sound configuration."""
+
+    __tablename__ = "xianyu_web_notification_config"
+
+    config_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default="default", server_default="default"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+    sound_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sound_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sound_mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sound_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sound_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
 class ChatwootInboxBindingORM(Base):
     """Automatically managed Chatwoot API inbox for one Xianyu account."""
 
