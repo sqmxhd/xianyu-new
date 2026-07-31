@@ -26,3 +26,15 @@ artifacts/
 *-deployment.zip
 internal-root-current-*.pem
 data/tls/
+
+# Docker 部署使用固定证书目录；只提交中文说明，不提交证书或私钥。
+config/tls/*
+!config/tls/README.md
+config/ca/*
+!config/ca/README.md
+
+# “开始部署.sh”的本机状态和下载的离线版本包。
+.xianyu-deploy-root
+xianyu-deployment/
+xianyu-*-linux-amd64.tar.gz
+xianyu-*-linux-amd64.tar.gz.sha256

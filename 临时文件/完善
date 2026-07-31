@@ -2,10 +2,3 @@
 抓一个手机版咸鱼的已卖出端口
 宝贝所在地  分类  按咸鱼页面发布 官网的   接入进来
 策略变量需要配置
-阶段：docker
-状态：
-archive-amd64
-状态：
-image-amd64
-
-现在这个文件名对吗？现在是 compose 点 yml，但是我看到很多这个 Docker 堆栈容器文件都是 docker-compose 点 yml。

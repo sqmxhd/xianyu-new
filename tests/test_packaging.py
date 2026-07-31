@@ -26,33 +26,40 @@ class PackagingContractTests(unittest.TestCase):
         self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
+        self.assertIn("chatwoot-source-amd64:", docker_jobs)
+        self.assertIn("chatwoot-image-amd64:", docker_jobs)
         self.assertIn("archive-amd64:", docker_jobs)
         self.assertIn(".container-delivery:", common_jobs)
         self.assertIn('$CI_COMMIT_BRANCH == "tg"', common_jobs)
-        self.assertIn('$CI_COMMIT_BRANCH == "main"', common_jobs)
-        self.assertIn("when: manual", common_jobs)
-        self.assertIn("allow_failure: true", common_jobs)
+        self.assertNotIn('$CI_COMMIT_BRANCH == "main"', common_jobs)
+        self.assertNotIn("$CI_COMMIT_TAG", common_jobs)
         self.assertNotIn("$CI_DEFAULT_BRANCH", common_jobs)
         self.assertIn("$CI_REGISTRY_IMAGE:latest", docker_jobs)
-        self.assertIn('version="main-${CI_COMMIT_SHORT_SHA}"', docker_jobs)
+        self.assertIn('RELEASE_SERIES: "1.0"', pipeline)
+        self.assertEqual(
+            docker_jobs.count('version="${RELEASE_SERIES}.${CI_PIPELINE_IID}"'),
+            2,
+        )
         self.assertNotIn("$CI_REGISTRY_IMAGE:edge", docker_jobs)
         self.assertIn(
             '--output "type=image,\\"name=$names\\",push=true"',
             docker_jobs,
         )
-        self.assertIn(
-            '--output "type=docker,name=$archive_image,dest=artifacts/$archive"',
-            docker_jobs,
+        self.assertIn("BundleImage.Dockerfile", docker_jobs)
+        self.assertIn("assemble_offline_bundle.sh", docker_jobs)
+        self.assertIn("pgvector/pgvector:pg16", docker_jobs)
+        self.assertIn("chatwoot:4.16.0-xianyu", docker_jobs)
+        self.assertNotIn("rm -rf .chatwoot/.git", docker_jobs)
+        self.assertGreaterEqual(
+            docker_jobs.count("--opt platform=linux/amd64"), 3
         )
-        self.assertEqual(docker_jobs.count("--opt platform=linux/amd64"), 2)
         self.assertIn("gzip -9", docker_jobs)
-        self.assertIn("cd artifacts", docker_jobs)
-        self.assertIn("sha256sum", docker_jobs)
         self.assertIn("expire_in: 14 days", docker_jobs)
         self.assertIn(
-            "artifacts/xianyu-admin-*-linux-amd64.docker.tar.gz",
+            "artifacts/xianyu-*-linux-amd64.tar.gz",
             docker_jobs,
         )
+        self.assertIn("artifacts/开始部署.sh", docker_jobs)
 
     def test_container_geoip_resources_are_complete(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -80,7 +87,8 @@ class PackagingContractTests(unittest.TestCase):
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("python -m tools.package.entry verify", dockerfile)
         self.assertIn(
-            'VOLUME ["/data/product-images", "/data/web-notification-sounds", '
+            'VOLUME ["/data/product-images", "/data/contact-avatars", '
+            '"/data/web-notification-sounds", '
             '"/data/browser-profiles", '
             '"/data/fingerprint-chromium", "/data/standard-chromium"]',
             dockerfile,
@@ -91,47 +99,95 @@ class PackagingContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('Path("/data/web-notification-sounds")', entrypoint)
+        self.assertIn('Path("/data/contact-avatars")', entrypoint)
+        self.assertIn('"chatwoot-gateway"', entrypoint)
 
     def test_container_deployment_has_no_fixed_public_origin(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.yml").read_text(encoding="utf-8")
-        bundled = (root / ".env.docker.example").read_text(encoding="utf-8")
-        external = (root / ".env.docker.external.example").read_text(
-            encoding="utf-8"
-        )
+        compose_all = (root / "compose.all.yml").read_text(encoding="utf-8")
+        external = (root / ".env.docker.example").read_text(encoding="utf-8")
+        self.assertFalse((root / ".env.docker.all.example").exists())
 
-        self.assertNotIn("https://192.168.2.3", compose)
-        self.assertNotIn("https://192.168.2.3", bundled)
-        self.assertNotIn("https://192.168.2.3", external)
-        self.assertIn('profiles:\n      - bundled', compose)
-        self.assertIn('required: false', compose)
+        self.assertFalse((root / ".env.docker.external.example").exists())
+        for contents in (compose, compose_all, external):
+            self.assertNotIn("https://192.168.2.3", contents)
         self.assertIn(
             '"${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"',
             compose,
         )
-        self.assertIn("COMPOSE_PROFILES=bundled", bundled)
-        self.assertIn("COMPOSE_PROFILES=", external)
-        self.assertNotIn("\n    build:", compose)
-        self.assertEqual(compose.count("pull_policy: always"), 3)
-        self.assertEqual(compose.count("platform: linux/amd64"), 3)
+        self.assertIn(
+            '"${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"',
+            compose_all,
+        )
+        for contents in (compose, compose_all):
+            self.assertNotIn("\n    build:", contents)
+            self.assertIn(
+                'XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"',
+                contents,
+            )
+            self.assertIn("max-size: \"20m\"", contents)
+            self.assertIn("max-file: \"5\"", contents)
+
+        self.assertEqual(compose.count("pull_policy: always"), 4)
+        self.assertEqual(compose.count("platform: linux/amd64"), 4)
+        self.assertIn(
+            "web-notification-sounds:/data/web-notification-sounds", compose
+        )
+        self.assertIn("runtime-secrets:/run/xianyu-secrets", compose)
+        self.assertIn("./config/tls:/run/secrets/xianyu-tls:ro", compose)
+
+        self.assertNotIn("pull_policy: always", compose_all)
+        self.assertEqual(compose_all.count("pull_policy: never"), 10)
+        self.assertIn("${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}", compose_all)
+        self.assertIn("data/xianyu/contact-avatars", compose_all)
+        self.assertIn("data/chatwoot/postgres", compose_all)
+        self.assertIn("certificates/xianyu", compose_all)
+        self.assertIn("certificates/chatwoot", compose_all)
+        self.assertIn("\n  chatwoot-rails:", compose_all)
+        self.assertIn("\n  chatwoot-sidekiq:", compose_all)
+        self.assertIn("\n  chatwoot-gateway:", compose_all)
+        self.assertIn("profiles: [chatwoot]", compose_all)
+
+        self.assertNotIn("\n  mysql:", compose)
+        self.assertNotIn("\n  redis:", compose)
+        self.assertIn("\n  mysql:", compose_all)
+        self.assertIn("\n  redis:", compose_all)
+        self.assertIn("MYSQL_PASSWORD_FILE:", compose_all)
+        self.assertIn("MYSQL_ROOT_PASSWORD_FILE:", compose_all)
+        self.assertIn(
+            "jwt-secret,mysql-root-password,mysql-password,redis-password",
+            compose_all,
+        )
         self.assertEqual(
-            compose.count(
-                '${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}'
-            ),
-            3,
+            [
+                line.split("=", 1)[0]
+                for line in external.splitlines()
+                if line and not line.startswith("#") and "=" in line
+            ],
+            ["XIANYU_DATABASE_URL", "XIANYU_REDIS_URL"],
         )
+
+    def test_offline_deployment_is_single_package_and_never_pulls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        deploy = (root / "开始部署.sh").read_text(encoding="utf-8")
+        assembler = (
+            root / "tools" / "package" / "assemble_offline_bundle.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("xianyu-*-linux-amd64.tar.gz", deploy)
+        self.assertIn("docker load", deploy)
+        self.assertNotIn("docker pull", deploy)
+        self.assertIn("证书管理", deploy)
+        self.assertIn("99991231235959Z", deploy)
+        self.assertIn("CHATWOOT_HTTPS_PORT", deploy)
+        self.assertIn("现有数据、配置、证书和密钥不会被修改", deploy)
         self.assertIn(
-            "web-notification-sounds:/data/web-notification-sounds",
-            compose,
+            'archive="$output_dir/xianyu-$release_version-linux-amd64.tar.gz"',
+            assembler,
         )
-        self.assertIn(
-            'XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"',
-            compose,
-        )
-        self.assertIn("max-size: \"20m\"", compose)
-        self.assertIn("max-file: \"5\"", compose)
-        self.assertNotIn("BASE_IMAGE_PREFIX=", bundled)
-        self.assertNotIn("BASE_IMAGE_PREFIX=", external)
+        self.assertIn("CHATWOOT_POSTGRES_IMAGE", assembler)
+        self.assertIn("SHA256SUMS", assembler)
 
     def test_gateway_limits_browser_archives_without_widening_general_api(
         self,

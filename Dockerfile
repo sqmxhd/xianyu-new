@@ -36,6 +36,7 @@ ENV PATH="/opt/xianyu-venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     LANGUAGE=zh_CN:zh:en_US:en \
     LC_ALL=zh_CN.UTF-8 \
     XIANYU_PRODUCT_IMAGE_DIR=/data/product-images \
+    XIANYU_CONTACT_AVATAR_DIR=/data/contact-avatars \
     XIANYU_WEB_NOTIFICATION_SOUND_DIR=/data/web-notification-sounds \
     XIANYU_IM_VERIFICATION_PROFILE_DIR=/data/browser-profiles \
     XIANYU_FINGERPRINT_BROWSER_ROOT=/data/fingerprint-chromium \
@@ -61,6 +62,7 @@ RUN apt-get update && \
     useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin xianyu && \
     mkdir -p \
       /data/product-images \
+      /data/contact-avatars \
       /data/web-notification-sounds \
       /data/browser-profiles \
       /data/fingerprint-chromium \
@@ -79,13 +81,14 @@ COPY integrations/ /app/integrations/
 COPY third_party/XianYuApis/ /app/third_party/XianYuApis/
 COPY tools/ /app/tools/
 COPY deploy/nginx/xianyu-container.conf /app/deploy/nginx/xianyu-container.conf
+COPY deploy/nginx/chatwoot-container.conf /app/deploy/nginx/chatwoot-container.conf
 COPY .env.example README.md /app/
 COPY --from=frontend /src/apps/admin/dist /app/apps/admin/dist
 
 RUN python -m tools.package.entry verify
 
 EXPOSE 8000 8443
-VOLUME ["/data/product-images", "/data/web-notification-sounds", "/data/browser-profiles", "/data/fingerprint-chromium", "/data/standard-chromium"]
+VOLUME ["/data/product-images", "/data/contact-avatars", "/data/web-notification-sounds", "/data/browser-profiles", "/data/fingerprint-chromium", "/data/standard-chromium"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "python", "/app/tools/container_entry.py"]
 CMD ["api"]

@@ -18,7 +18,11 @@ DELETE 接口。闲鱼映射消息删除后，本项目通过 Webhook 调用闲�
 底部显示“闲鱼消息已撤回”或具体失败原因。该链路不需要修改 Chatwoot Nginx。
 买家消息、私密备注、未映射消息仍保持 Chatwoot 原生删除行为。
 
-在运行 Chatwoot Docker Compose 的主机上，将本目录复制过去后执行：
+正式离线部署已经把这个定制镜像纳入 `tg` 流水线和统一版本包。目标主机不再需要
+单独构建 Chatwoot，也不需要维护第二份 Compose；使用根目录 `开始部署.sh` 即可
+同时启动 Chatwoot、Sidekiq、pgvector PostgreSQL、Redis 和 HTTPS 网关。
+
+下面的手工构建方式只保留给补丁开发和本地验证：
 
 ```bash
 chmod +x build-no-outbound-audio.sh

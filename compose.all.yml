@@ -1,0 +1,332 @@
+name: xianyu
+
+# 离线 ALL 堆栈。所有镜像名由版本包的 state/current-release.env 注入，
+# 所有数据、配置和证书都通过 DEPLOY_ROOT 绑定到宿主机；禁止自动拉取镜像。
+
+x-xianyu-environment: &xianyu-environment
+  XIANYU_RUNTIME_SECRET_DIR: /run/xianyu-secrets
+  XIANYU_DATABASE_HOST: mysql
+  XIANYU_DATABASE_USER: xianyu
+  XIANYU_DATABASE_NAME: xianyu_admin
+  XIANYU_REDIS_HOST: redis
+  XIANYU_INTERNAL_API_URL: http://api:8000
+  XIANYU_API_HEALTH_URL: http://api:8000/api/health
+  XIANYU_PUBLIC_BASE_URL: "${XIANYU_PUBLIC_BASE_URL:?请先运行开始部署.sh完成配置}"
+  XIANYU_CORS_ORIGINS: "${XIANYU_CORS_ORIGINS:-}"
+  XIANYU_JWT_EXPIRES_MINUTES: "${XIANYU_JWT_EXPIRES_MINUTES:-10080}"
+  XIANYU_COOKIE_RENEWAL_ENABLED: "${XIANYU_COOKIE_RENEWAL_ENABLED:-true}"
+  XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS: "${XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS:-1}"
+  XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS:-600}"
+  XIANYU_COOKIE_KEEPALIVE_RECHECK_MIN_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_RECHECK_MIN_SECONDS:-15}"
+  XIANYU_COOKIE_KEEPALIVE_RECHECK_MAX_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_RECHECK_MAX_SECONDS:-30}"
+  XIANYU_COOKIE_RENEWAL_SCAN_SECONDS: "${XIANYU_COOKIE_RENEWAL_SCAN_SECONDS:-60}"
+  XIANYU_COOKIE_RENEWAL_MANUAL_COOLDOWN_SECONDS: "${XIANYU_COOKIE_RENEWAL_MANUAL_COOLDOWN_SECONDS:-3600}"
+  XIANYU_CONVERSATION_SYNC_INTERVAL_SECONDS: "${XIANYU_CONVERSATION_SYNC_INTERVAL_SECONDS:-180}"
+  XIANYU_CHATWOOT_RECONCILE_INTERVAL_SECONDS: "${XIANYU_CHATWOOT_RECONCILE_INTERVAL_SECONDS:-900}"
+  XIANYU_CHATWOOT_READ_SYNC_INTERVAL_SECONDS: "${XIANYU_CHATWOOT_READ_SYNC_INTERVAL_SECONDS:-20}"
+  XIANYU_CONVERSATION_FULL_SYNC_MAX_PAGES: "${XIANYU_CONVERSATION_FULL_SYNC_MAX_PAGES:-50}"
+  XIANYU_QR_LOGIN_WORKERS: "${XIANYU_QR_LOGIN_WORKERS:-2}"
+  XIANYU_QR_LOGIN_MAX_ACTIVE_SESSIONS: "${XIANYU_QR_LOGIN_MAX_ACTIVE_SESSIONS:-4}"
+  XIANYU_RUNTIME_START_CONCURRENCY: "${XIANYU_RUNTIME_START_CONCURRENCY:-3}"
+  XIANYU_RUNTIME_START_JITTER_SECONDS: "${XIANYU_RUNTIME_START_JITTER_SECONDS:-3}"
+  XIANYU_CONVERSATION_SYNC_CONCURRENCY: "${XIANYU_CONVERSATION_SYNC_CONCURRENCY:-3}"
+  XIANYU_COOKIE_RENEWAL_CONCURRENCY: "${XIANYU_COOKIE_RENEWAL_CONCURRENCY:-2}"
+  XIANYU_WORKER_CONCURRENCY: "${XIANYU_WORKER_CONCURRENCY:-4}"
+  XIANYU_WORKER_LEASE_SECONDS: "${XIANYU_WORKER_LEASE_SECONDS:-120}"
+  XIANYU_WORKER_LEASE_RENEW_SECONDS: "${XIANYU_WORKER_LEASE_RENEW_SECONDS:-30}"
+  XIANYU_IM_VERIFICATION_SESSION_SECONDS: "${XIANYU_IM_VERIFICATION_SESSION_SECONDS:-600}"
+  XIANYU_ACCOUNT_BROWSER_IDLE_SECONDS: "${XIANYU_ACCOUNT_BROWSER_IDLE_SECONDS:-1800}"
+  XIANYU_ACCOUNT_BROWSER_MAX_SESSION_SECONDS: "${XIANYU_ACCOUNT_BROWSER_MAX_SESSION_SECONDS:-28800}"
+  XIANYU_ACCOUNT_BROWSER_MAX_SESSIONS: "${XIANYU_ACCOUNT_BROWSER_MAX_SESSIONS:-3}"
+  XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"
+  XIANYU_FINGERPRINT_BROWSER_MAX_EXTRACTED_BYTES: "1073741824"
+
+x-xianyu-volumes: &xianyu-volumes
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/product-images:/data/product-images"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/contact-avatars:/data/contact-avatars"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/notification-sounds:/data/web-notification-sounds"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/browser-profiles:/data/browser-profiles"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/fingerprint-chromium:/data/fingerprint-chromium"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/standard-chromium:/data/standard-chromium"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/trust:/etc/xianyu/ca:ro"
+
+x-chatwoot-environment: &chatwoot-environment
+  NODE_ENV: production
+  RAILS_ENV: production
+  INSTALLATION_ENV: docker
+  FRONTEND_URL: "${CHATWOOT_PUBLIC_BASE_URL:?Chatwoot 地址未配置}"
+  FORCE_SSL: "false"
+  ENABLE_ACCOUNT_SIGNUP: "${CHATWOOT_ENABLE_ACCOUNT_SIGNUP:-true}"
+  DEFAULT_LOCALE: zh_CN
+  ACTIVE_STORAGE_SERVICE: local
+  RAILS_LOG_TO_STDOUT: "true"
+  RAILS_MAX_THREADS: "5"
+  ENABLE_PUSH_RELAY_SERVER: "true"
+  POSTGRES_HOST: chatwoot-postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DATABASE: chatwoot
+  POSTGRES_USERNAME: postgres
+  REDIS_URL: redis://chatwoot-redis:6379
+  SSL_CERT_FILE: /etc/ssl/certs/xianyu-combined-ca.pem
+  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/xianyu-combined-ca.pem
+
+x-chatwoot-service: &chatwoot-service
+  image: "${CHATWOOT_IMAGE:?版本包缺少 CHATWOOT_IMAGE}"
+  pull_policy: never
+  platform: linux/amd64
+  restart: unless-stopped
+  env_file:
+    - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/chatwoot.env"
+  environment:
+    <<: *chatwoot-environment
+  volumes:
+    - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/storage:/app/storage"
+    - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/trust/combined-ca.pem:/etc/ssl/certs/xianyu-combined-ca.pem:ro"
+  networks:
+    - chatwoot
+  depends_on:
+    chatwoot-postgres:
+      condition: service_healthy
+    chatwoot-redis:
+      condition: service_healthy
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  init-config:
+    image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    command: [init-config]
+    restart: "no"
+    network_mode: none
+    environment:
+      XIANYU_RUNTIME_SECRET_DIR: /run/xianyu-secrets
+      XIANYU_GENERATED_SECRETS: jwt-secret,mysql-root-password,mysql-password,redis-password
+      XIANYU_SECRET_GUARD_DIRS: /var/lib/mysql,/data/redis
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/mysql:/var/lib/mysql:ro"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/redis:/data/redis:ro"
+    logging: *default-logging
+
+  mysql:
+    image: "${MYSQL_IMAGE:?版本包缺少 MYSQL_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: xianyu_admin
+      MYSQL_USER: xianyu
+      MYSQL_PASSWORD_FILE: /run/xianyu-secrets/mysql-password
+      MYSQL_ROOT_PASSWORD_FILE: /run/xianyu-secrets/mysql-root-password
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/mysql:/var/lib/mysql"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
+    networks: [xianyu-backend]
+    logging: *default-logging
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$(cat /run/xianyu-secrets/mysql-root-password)" mysqladmin ping -h 127.0.0.1 -uroot --silent']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: "${REDIS_IMAGE:?版本包缺少 REDIS_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    command: [/bin/sh, -c, 'exec redis-server --appendonly yes --requirepass "$$(cat /run/xianyu-secrets/redis-password)"']
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/redis:/data"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
+    networks: [xianyu-backend]
+    logging: *default-logging
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli -a "$$(cat /run/xianyu-secrets/redis-password)" ping >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  api:
+    image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    command: [api]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      <<: *xianyu-environment
+    volumes: *xianyu-volumes
+    networks: [xianyu-frontend, xianyu-backend, chatwoot]
+    logging: *default-logging
+    shm_size: 1gb
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  worker:
+    image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    command: [worker]
+    restart: unless-stopped
+    stop_grace_period: 120s
+    environment:
+      <<: *xianyu-environment
+    volumes: *xianyu-volumes
+    networks: [xianyu-backend, chatwoot]
+    logging: *default-logging
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, /app/tools/container_entry.py, worker-health]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  gateway:
+    image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    command: [gateway]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/xianyu:/run/secrets/xianyu-tls:ro"
+    networks: [xianyu-frontend]
+    logging: *default-logging
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/api/health', context=ssl._create_unverified_context(), timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  chatwoot-postgres:
+    image: "${CHATWOOT_POSTGRES_IMAGE:?版本包缺少 CHATWOOT_POSTGRES_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    profiles: [chatwoot]
+    restart: unless-stopped
+    env_file:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/chatwoot.env"
+    environment:
+      POSTGRES_DB: chatwoot
+      POSTGRES_USER: postgres
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/postgres:/var/lib/postgresql/data"
+    networks: [chatwoot]
+    logging: *default-logging
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d chatwoot']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  chatwoot-redis:
+    image: "${CHATWOOT_REDIS_IMAGE:?版本包缺少 CHATWOOT_REDIS_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    profiles: [chatwoot]
+    restart: unless-stopped
+    env_file:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/chatwoot.env"
+    command: [/bin/sh, -c, 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/redis:/data"
+    networks: [chatwoot]
+    logging: *default-logging
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli -a "$$REDIS_PASSWORD" ping >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  chatwoot-prepare:
+    <<: *chatwoot-service
+    profiles: [chatwoot]
+    restart: "no"
+    entrypoint: docker/entrypoints/rails.sh
+    command: [bundle, exec, rails, db:chatwoot_prepare]
+
+  chatwoot-rails:
+    <<: *chatwoot-service
+    profiles: [chatwoot]
+    entrypoint: docker/entrypoints/rails.sh
+    command: [bundle, exec, rails, s, -p, "3000", -b, 0.0.0.0]
+    depends_on:
+      chatwoot-prepare:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, ruby, -rsocket, -e, 'TCPSocket.new("127.0.0.1", 3000).close']
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 45s
+
+  chatwoot-sidekiq:
+    <<: *chatwoot-service
+    profiles: [chatwoot]
+    command: [bundle, exec, sidekiq, -C, config/sidekiq.yml]
+    depends_on:
+      chatwoot-prepare:
+        condition: service_completed_successfully
+
+  chatwoot-gateway:
+    image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
+    pull_policy: never
+    platform: linux/amd64
+    profiles: [chatwoot]
+    command: [chatwoot-gateway]
+    restart: unless-stopped
+    ports:
+      - "${CHATWOOT_BIND_IP:-0.0.0.0}:${CHATWOOT_HTTPS_PORT:-6443}:8443"
+    volumes:
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/chatwoot:/run/secrets/chatwoot-tls:ro"
+    networks: [chatwoot]
+    logging: *default-logging
+    depends_on:
+      chatwoot-rails:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/', context=ssl._create_unverified_context(), timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+networks:
+  xianyu-frontend:
+  xianyu-backend:
+  chatwoot:

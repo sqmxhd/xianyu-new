@@ -22,7 +22,9 @@ Ant Design + FastAPI 的多平台管理后台。
 npm run dev
 ```
 
-`npm run dev` 会执行完整实测链路：建库检查、构建 Ant 后台、启动 FastAPI、启动 worker、启动 9000 端口后台预览。
+首次运行会从 `.env.example` 创建私有的 `.env.local` 并自动生成 JWT 密钥；
+只需填写外部 MySQL、Redis 两条连接地址。随后 `npm run dev` 会执行完整实测链路：
+建库检查、构建 Ant 后台、启动 FastAPI、启动 worker、启动 9001 端口后台预览。
 
 需要热更新开发时使用：
 
@@ -47,39 +49,54 @@ GitLab 测试、Docker 镜像发布和 Docker Compose 部署说明见
 npm run dev
 ```
 
-Docker HTTPS 部署从 GitLab Registry 拉取 `tg` 分支发布的 `latest`：
+正式 Docker 部署使用 `tg` 流水线生成的单一完整版本包。把以下三个文件放在
+同一目录后运行脚本：
+
+```bash
+chmod +x 开始部署.sh
+./开始部署.sh
+```
+
+```text
+开始部署.sh
+xianyu-<版本>-linux-amd64.tar.gz
+xianyu-<版本>-linux-amd64.tar.gz.sha256
+```
+
+同一个版本包既用于首次部署，也用于后续升级；不再区分“全量包”和“升级包”。
+它包含本项目、定制 Chatwoot、MySQL、Redis、pgvector PostgreSQL 和 Compose。
+部署脚本不会执行 `docker pull`，会在首次部署时询问外部端口、URL 和证书方案，
+并把数据、密钥、证书及配置保存在宿主机部署目录中。升级不会覆盖这些内容。
+
+只启动项目容器并使用已有的外部 MySQL、Redis：
 
 ```bash
 cp .env.docker.example .env.docker
-docker login 192.168.2.5:5050
-docker compose --env-file .env.docker --profile bundled pull
-docker compose --env-file .env.docker --profile bundled up -d --wait --remove-orphans
-```
-
-使用已有的外部 MySQL 和 Redis：
-
-```bash
-cp .env.docker.external.example .env.docker
+# 只填写 XIANYU_DATABASE_URL 和 XIANYU_REDIS_URL
 docker login 192.168.2.5:5050
 docker compose --env-file .env.docker pull
 docker compose --env-file .env.docker up -d --wait --remove-orphans
 ```
 
-Docker 网关默认监听宿主机 `0.0.0.0:6161`，公开地址、跨域来源和端口均通过
-`.env.docker` 配置，不绑定固定业务网址。生产 Compose 不包含源码构建步骤；
-需要切换到固定版本时，把 `XIANYU_IMAGE` 改为版本标签或完整提交 SHA。
+离线部署默认建议闲鱼平台使用 `6161`、Chatwoot 使用 `6443`；最终端口和公开
+HTTPS 地址均在部署过程中确认。MySQL、Redis、PostgreSQL、API 等内部服务不发布
+宿主机端口。
 
-`tg` 和 Git Tag 流水线还会生成保留 14 天的
-`linux-amd64.docker.tar.gz` 镜像压缩包及 SHA-256 校验文件；`main` 中对应的
-Registry 镜像和压缩包任务为手动任务。离线导入和启动方式见
+只有 `tg` 分支执行镜像发布和完整版本包归档；`main` 不再显示或执行发布任务。
+Registry 中应用镜像同时发布 `latest`，完整版本包和 SHA-256 校验文件保留 14 天。
+离线导入、证书和数据目录说明见
 [`docs/packaging.md`](docs/packaging.md)。
 
 ## 配置文件
 
-- `.env.example`：提交到 git 的模板。
-- `.env.docker.example`：自带独立 MySQL、Redis 容器的完整部署模板。
-- `.env.docker.external.example`：接入外部 MySQL、Redis 的部署模板。
-- `.env.local`：本机实际配置，已加入 `.gitignore`，不要提交。
+- `.env.example`：源码启动模板，只有外部 MySQL、Redis 两项人工必填。
+- `.env.docker.example`：Docker 外部 MySQL、Redis 模板，同样只有两项必填。
+- `.env.local`、`.env.docker`：实际私有配置，已加入 `.gitignore`，不要提交。
+- `compose.yml`：仅项目容器、连接外部 MySQL/Redis 的高级入口。
+- `compose.all.yml`：离线版本包内部定义，由 `开始部署.sh` 管理，不需要手工填写 ENV。
+
+所有参数的中文分类、默认值和风险说明见
+[`docs/configuration.md`](docs/configuration.md)。
 
 ## 上游约束
 

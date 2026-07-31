@@ -1,15 +1,17 @@
 name: xianyu
 
+# 项目容器模式：只启动闲鱼 API、Worker 和 HTTPS 网关。
+# MySQL、Redis 由外部提供；需要填写 .env.docker 中的两条连接地址。
+
 x-application-environment: &application-environment
-  XIANYU_DATABASE_URL: "${XIANYU_DATABASE_URL:?set XIANYU_DATABASE_URL in .env.docker}"
-  XIANYU_REDIS_URL: "${XIANYU_REDIS_URL:?set XIANYU_REDIS_URL in .env.docker}"
-  XIANYU_JWT_SECRET: "${XIANYU_JWT_SECRET:?set XIANYU_JWT_SECRET in .env.docker}"
-  XIANYU_JWT_EXPIRES_MINUTES: "${XIANYU_JWT_EXPIRES_MINUTES:-10080}"
-  XIANYU_INTERNAL_API_URL: "http://api:8000"
-  XIANYU_API_HEALTH_URL: "http://api:8000/api/health"
+  XIANYU_DATABASE_URL: "${XIANYU_DATABASE_URL:?请在 .env.docker 中填写外部 MySQL 连接地址}"
+  XIANYU_REDIS_URL: "${XIANYU_REDIS_URL:?请在 .env.docker 中填写外部 Redis 连接地址}"
+  XIANYU_RUNTIME_SECRET_DIR: /run/xianyu-secrets
+  XIANYU_INTERNAL_API_URL: http://api:8000
+  XIANYU_API_HEALTH_URL: http://api:8000/api/health
   XIANYU_PUBLIC_BASE_URL: "${XIANYU_PUBLIC_BASE_URL:-}"
   XIANYU_CORS_ORIGINS: "${XIANYU_CORS_ORIGINS:-}"
-  XIANYU_CHATWOOT_CA_BUNDLE: "/etc/xianyu/ca/internal-root.crt"
+  XIANYU_JWT_EXPIRES_MINUTES: "${XIANYU_JWT_EXPIRES_MINUTES:-10080}"
   XIANYU_COOKIE_RENEWAL_ENABLED: "${XIANYU_COOKIE_RENEWAL_ENABLED:-true}"
   XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS: "${XIANYU_COOKIE_RENEWAL_INTERVAL_HOURS:-1}"
   XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS: "${XIANYU_COOKIE_KEEPALIVE_INTERVAL_SECONDS:-600}"
@@ -39,14 +41,13 @@ x-application-environment: &application-environment
 
 x-application-volumes: &application-volumes
   - product-images:/data/product-images
+  - contact-avatars:/data/contact-avatars
   - web-notification-sounds:/data/web-notification-sounds
   - browser-profiles:/data/browser-profiles
   - fingerprint-chromium:/data/fingerprint-chromium
   - standard-chromium:/data/standard-chromium
-  - type: bind
-    source: "${XIANYU_INTERNAL_CA_FILE:?set XIANYU_INTERNAL_CA_FILE in .env.docker}"
-    target: /etc/xianyu/ca/internal-root.crt
-    read_only: true
+  - runtime-secrets:/run/xianyu-secrets:ro
+  - ./config/ca:/etc/xianyu/ca:ro
 
 x-default-logging: &default-logging
   driver: json-file
@@ -55,58 +56,22 @@ x-default-logging: &default-logging
     max-file: "5"
 
 services:
-  mysql:
-    image: "${MYSQL_IMAGE:-mysql:8.4}"
-    profiles:
-      - bundled
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: xianyu_admin
-      MYSQL_USER: xianyu
-      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-xianyu-change-me}"
-      # Keep interpolation valid while this profiled service is disabled.
-      # The bundled environment template supplies the required real value.
-      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-}"
-    volumes:
-      - mysql-data:/var/lib/mysql
-    networks:
-      - backend
-    logging: *default-logging
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-
-  redis:
-    image: "${REDIS_IMAGE:-redis:7.4-alpine}"
-    profiles:
-      - bundled
-    restart: unless-stopped
-    environment:
-      REDIS_PASSWORD: "${REDIS_PASSWORD:-xianyu-change-me}"
+  init-config:
+    image: "${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}"
+    pull_policy: always
+    platform: linux/amd64
     command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --requirepass
-      - "${REDIS_PASSWORD:-xianyu-change-me}"
+      - init-config
+    restart: "no"
+    network_mode: none
+    environment:
+      XIANYU_RUNTIME_SECRET_DIR: /run/xianyu-secrets
+      XIANYU_GENERATED_SECRETS: jwt-secret
+      # 仅用于从旧部署迁移；全新部署保持未设置即可自动生成。
+      XIANYU_JWT_SECRET: "${XIANYU_JWT_SECRET:-}"
     volumes:
-      - redis-data:/data
-    networks:
-      - backend
+      - runtime-secrets:/run/xianyu-secrets
     logging: *default-logging
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - redis-cli -a "$$REDIS_PASSWORD" ping
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
 
   api:
     image: "${XIANYU_IMAGE:-192.168.2.5:5050/bug/xianyu:latest}"
@@ -125,12 +90,8 @@ services:
     logging: *default-logging
     shm_size: 1gb
     depends_on:
-      mysql:
-        condition: service_healthy
-        required: false
-      redis:
-        condition: service_healthy
-        required: false
+      init-config:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -163,8 +124,8 @@ services:
       test:
         - CMD
         - python
-        - -c
-        - "import asyncio,sys; from apps.api.xianyu_admin_api.process_health import read_worker_heartbeat; state=asyncio.run(read_worker_heartbeat()); sys.exit(0 if state.get('online') else 1)"
+        - /app/tools/container_entry.py
+        - worker-health
       interval: 10s
       timeout: 5s
       retries: 3
@@ -181,10 +142,7 @@ services:
     ports:
       - "${XIANYU_BIND_IP:-0.0.0.0}:${XIANYU_HTTPS_PORT:-6161}:8443"
     volumes:
-      - type: bind
-        source: "${XIANYU_TLS_DIR:?set XIANYU_TLS_DIR in .env.docker}"
-        target: /run/secrets/xianyu-tls
-        read_only: true
+      - ./config/tls:/run/secrets/xianyu-tls:ro
     networks:
       - frontend
     logging: *default-logging
@@ -207,9 +165,9 @@ networks:
   backend:
 
 volumes:
-  mysql-data:
-  redis-data:
+  runtime-secrets:
   product-images:
+  contact-avatars:
   web-notification-sounds:
   browser-profiles:
   fingerprint-chromium:

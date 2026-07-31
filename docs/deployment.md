@@ -1,5 +1,9 @@
 # Deployment
 
+正式 Docker 离线部署请直接使用 [`packaging.md`](packaging.md) 中的完整版本包和
+`开始部署.sh`。本页其余内容用于源码安装、开发工作区和 systemd 方式，不是离线
+Docker ALL 堆栈的操作步骤。
+
 ## Layout
 
 Recommended production path:
@@ -8,14 +12,17 @@ Recommended production path:
 /opt/xianyu
 ```
 
-Environment files:
+源码启动配置：
 
 ```text
-.env.example  # committed template
-.env.local    # real local/deployment values, ignored by git
+.env.example  # 中文模板，只提交模板
+.env.local    # 实际私有值，由首次启动创建并被 Git 忽略
 ```
 
-Use `.env.example` as the only template. Do not commit `.env.local` or any real secrets.
+源码模式只需要填写外部 MySQL、Redis 地址，JWT 由 `npm run dev` 首次自动生成。
+Docker 配置、ALL 零参数启动和完整参数分类见
+[`configuration.md`](configuration.md)。不要提交 `.env.local`、`.env.docker` 或任何
+真实密钥，也不要创建用途不明确的 `.env`。
 
 ## Install
 
