@@ -26,7 +26,7 @@
 image-amd64:
   extends:
     - .buildkit
-    - .container-release
+    - .container-delivery
   needs:
     - job: backend
       artifacts: false
@@ -40,18 +40,93 @@ image-amd64:
       if [ -n "${CI_COMMIT_TAG:-}" ]; then
         version="${CI_COMMIT_TAG#v}"
         names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version"
-      else
+      elif [ "${CI_COMMIT_BRANCH:-}" = "tg" ]; then
         version="${CI_COMMIT_SHORT_SHA}"
         names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version,$CI_REGISTRY_IMAGE:latest"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "main" ]; then
+        version="main-${CI_COMMIT_SHORT_SHA}"
+        names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version"
+      else
+        echo "Unsupported container delivery ref" >&2
+        exit 1
+      fi
+      case "$version" in
+        ""|[.-]*|*[!A-Za-z0-9_.-]*)
+          echo "Invalid container version tag: $version" >&2
+          exit 1
+          ;;
+      esac
+      if [ "${#version}" -gt 128 ]; then
+        echo "Container version tag is longer than 128 characters" >&2
+        exit 1
       fi
       buildctl-daemonless.sh build \
         --frontend dockerfile.v0 \
         --local context=. \
         --local dockerfile=. \
         --opt filename=Dockerfile \
+        --opt platform=linux/amd64 \
         --opt "build-arg:BASE_IMAGE_PREFIX=$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX" \
         --opt "build-arg:BUILD_VERSION=$version" \
         --opt "build-arg:BUILD_COMMIT=$CI_COMMIT_SHA" \
         --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
         --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64,mode=max" \
         --output "type=image,\"name=$names\",push=true"
+
+archive-amd64:
+  extends:
+    - .buildkit
+    - .container-delivery
+  needs:
+    - job: image-amd64
+      artifacts: false
+  script:
+    - |
+      set -eu
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        version="${CI_COMMIT_TAG#v}"
+        archive_image="$CI_REGISTRY_IMAGE:$version"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "tg" ]; then
+        version="${CI_COMMIT_SHORT_SHA}"
+        archive_image="$CI_REGISTRY_IMAGE:latest"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "main" ]; then
+        version="main-${CI_COMMIT_SHORT_SHA}"
+        archive_image="$CI_REGISTRY_IMAGE:$version"
+      else
+        echo "Unsupported container archive ref" >&2
+        exit 1
+      fi
+      case "$version" in
+        ""|[.-]*|*[!A-Za-z0-9_.-]*)
+          echo "Invalid archive version tag: $version" >&2
+          exit 1
+          ;;
+      esac
+      if [ "${#version}" -gt 128 ]; then
+        echo "Archive version tag is longer than 128 characters" >&2
+        exit 1
+      fi
+      archive="xianyu-admin-$version-linux-amd64.docker.tar"
+      mkdir -p artifacts
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=Dockerfile \
+        --opt platform=linux/amd64 \
+        --opt "build-arg:BASE_IMAGE_PREFIX=$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX" \
+        --opt "build-arg:BUILD_VERSION=$version" \
+        --opt "build-arg:BUILD_COMMIT=$CI_COMMIT_SHA" \
+        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
+        --output "type=docker,name=$archive_image,dest=artifacts/$archive"
+      gzip -9 "artifacts/$archive"
+      (
+        cd artifacts
+        sha256sum "$archive.gz" > "$archive.gz.sha256"
+      )
+  artifacts:
+    name: "xianyu-admin-${CI_COMMIT_SHORT_SHA}-linux-amd64-docker"
+    expire_in: 14 days
+    paths:
+      - artifacts/xianyu-admin-*-linux-amd64.docker.tar.gz
+      - artifacts/xianyu-admin-*-linux-amd64.docker.tar.gz.sha256

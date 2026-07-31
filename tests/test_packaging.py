@@ -12,7 +12,7 @@ from tools.package.build import resolve_version
 
 
 class PackagingContractTests(unittest.TestCase):
-    def test_pipeline_publishes_only_the_registry_image_from_tg_or_tags(self) -> None:
+    def test_pipeline_delivers_registry_and_downloadable_images(self) -> None:
         root = Path(__file__).resolve().parents[1]
         pipeline = (root / ".gitlab-ci.yml").read_text(encoding="utf-8")
         common_jobs = (root / ".gitlab" / "ci" / "common.yml").read_text(
@@ -26,14 +26,31 @@ class PackagingContractTests(unittest.TestCase):
         self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
-        self.assertNotIn("archive-amd64:", docker_jobs)
-        self.assertIn(".container-release:", common_jobs)
+        self.assertIn("archive-amd64:", docker_jobs)
+        self.assertIn(".container-delivery:", common_jobs)
         self.assertIn('$CI_COMMIT_BRANCH == "tg"', common_jobs)
+        self.assertIn('$CI_COMMIT_BRANCH == "main"', common_jobs)
+        self.assertIn("when: manual", common_jobs)
+        self.assertIn("allow_failure: true", common_jobs)
         self.assertNotIn("$CI_DEFAULT_BRANCH", common_jobs)
         self.assertIn("$CI_REGISTRY_IMAGE:latest", docker_jobs)
+        self.assertIn('version="main-${CI_COMMIT_SHORT_SHA}"', docker_jobs)
         self.assertNotIn("$CI_REGISTRY_IMAGE:edge", docker_jobs)
         self.assertIn(
             '--output "type=image,\\"name=$names\\",push=true"',
+            docker_jobs,
+        )
+        self.assertIn(
+            '--output "type=docker,name=$archive_image,dest=artifacts/$archive"',
+            docker_jobs,
+        )
+        self.assertEqual(docker_jobs.count("--opt platform=linux/amd64"), 2)
+        self.assertIn("gzip -9", docker_jobs)
+        self.assertIn("cd artifacts", docker_jobs)
+        self.assertIn("sha256sum", docker_jobs)
+        self.assertIn("expire_in: 14 days", docker_jobs)
+        self.assertIn(
+            "artifacts/xianyu-admin-*-linux-amd64.docker.tar.gz",
             docker_jobs,
         )
 

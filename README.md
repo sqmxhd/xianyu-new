@@ -69,6 +69,11 @@ Docker 网关默认监听宿主机 `0.0.0.0:6161`，公开地址、跨域来源�
 `.env.docker` 配置，不绑定固定业务网址。生产 Compose 不包含源码构建步骤；
 需要切换到固定版本时，把 `XIANYU_IMAGE` 改为版本标签或完整提交 SHA。
 
+`tg` 和 Git Tag 流水线还会生成保留 14 天的
+`linux-amd64.docker.tar.gz` 镜像压缩包及 SHA-256 校验文件；`main` 中对应的
+Registry 镜像和压缩包任务为手动任务。离线导入和启动方式见
+[`docs/packaging.md`](docs/packaging.md)。
+
 ## 配置文件
 
 - `.env.example`：提交到 git 的模板。

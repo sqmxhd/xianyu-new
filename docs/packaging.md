@@ -16,19 +16,33 @@ backend
 frontend
 portability
 image-amd64
+archive-amd64
 ```
 
-Every branch and merge request pipeline runs tests. Container publishing is
+Every branch and merge request pipeline runs tests. Container delivery is
 restricted to:
 
 - the lowercase `tg` branch, which publishes `latest`, the short commit SHA,
-  and the full commit SHA;
+  and the full commit SHA, then exports a downloadable Docker archive;
 - Git tags, which publish the version tag (with an optional leading `v`
-  removed) and the full commit SHA.
+  removed) and the full commit SHA, then export a versioned Docker archive;
+- `main`, where both container jobs are visible but manual. A manual registry
+  build publishes only `main-<short-sha>` and the full commit SHA.
 
-`main` and feature branches never publish an image. A Git tag does not move
-`latest`. The deployment consumes the registry directly, so the pipeline does
-not create a downloadable OCI archive.
+Feature branches and merge requests do not expose container jobs. Only `tg`
+moves `latest`; neither `main` nor a Git tag can overwrite it.
+
+`archive-amd64` waits for `image-amd64` and exports the same commit as a
+Docker-compatible, gzip-compressed image archive with a SHA-256 checksum:
+
+```text
+xianyu-admin-<version>-linux-amd64.docker.tar.gz
+xianyu-admin-<version>-linux-amd64.docker.tar.gz.sha256
+```
+
+The files are GitLab job artifacts retained for 14 days. They contain only the
+application image, not the MySQL or Redis images. The GitLab project artifact
+size limit must be large enough for the compressed application image.
 
 ## Required runner
 
@@ -94,6 +108,25 @@ The Compose file is an image-only production definition. It never builds from
 the local checkout, always checks the registry before starting, and pins the
 runtime platform to `linux/amd64`. Local development remains the source-based
 `npm run dev` workflow.
+
+For offline application-image delivery, download both archive files, verify the
+checksum, and load the image:
+
+```bash
+sha256sum -c xianyu-admin-*.docker.tar.gz.sha256
+gzip -dc xianyu-admin-*.docker.tar.gz | docker load
+```
+
+Set `XIANYU_IMAGE` to the tag contained in the archive and prevent Compose from
+contacting the registry:
+
+```bash
+docker compose --env-file .env.docker --profile bundled up \
+  -d --wait --remove-orphans --pull never
+```
+
+An entirely offline bundled deployment must also preload the configured MySQL
+and Redis images. No additional Compose file is required.
 
 The deployment exposes only the HTTPS gateway. The default host port is `6161`.
 `XIANYU_BIND_IP` defaults to `0.0.0.0`, so the gateway accepts traffic on every
