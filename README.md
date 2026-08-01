@@ -50,7 +50,7 @@ GitLab 测试、Docker 镜像发布和 Docker Compose 部署说明见
 npm run dev
 ```
 
-正式 Docker 部署使用 `tg` 流水线生成的本项目镜像包。把以下四个文件放在
+正式 Docker 部署使用 `main` 流水线生成的本项目镜像包。把以下四个文件放在
 同一目录后运行脚本：
 
 ```bash
@@ -85,8 +85,8 @@ HTTPS 地址均在部署过程中确认。完整部署固定运行 5 个常驻�
 Chatwoot 官方 Rails/Sidekiq、共享 PostgreSQL 和共享 Redis。数据库、Redis、API
 等内部服务不发布宿主机端口。
 
-小写 `tg` 分支自动执行镜像发布及镜像包归档；`main`、其他分支和 Git Tag
-只运行验证，不显示发布任务。
+`main` 分支自动执行镜像发布及镜像包归档；其他分支和 Git Tag 只运行验证，
+不显示发布任务。
 Registry 中应用镜像同时发布 `latest`，镜像包和 SHA-256 校验文件保留 14 天。
 本地镜像导入、证书和数据目录说明见
 [`docs/packaging.md`](docs/packaging.md)。

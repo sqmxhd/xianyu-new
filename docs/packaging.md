@@ -9,8 +9,8 @@
 - `image-amd64` 推送 Registry 镜像；
 - `archive-amd64` 导出同版本的 `linux/amd64` Docker 镜像压缩包。
 
-`tg` 分支自动发布完整提交 SHA、`1.0.<pipeline-iid>` 和 `latest`。`main`、其他
-分支、合并请求和 Git Tag 只执行验证，不显示发布作业。
+`main` 分支自动发布完整提交 SHA、`1.0.<pipeline-iid>` 和 `latest`。其他分支、
+合并请求和 Git Tag 只执行验证，不显示发布作业。
 
 下载产物为：
 
