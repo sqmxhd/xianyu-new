@@ -99,14 +99,19 @@ def build_engine(database_url: str) -> Engine:
     if sqlite_path is not None:
         sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         connect_args["check_same_thread"] = False
-    elif database_url.startswith("mysql"):
+    elif database_url.startswith(("mysql", "postgresql")):
         connect_args.update(
             {
                 "connect_timeout": 5,
-                "read_timeout": 10,
-                "write_timeout": 10,
             }
         )
+        if database_url.startswith("mysql"):
+            connect_args.update(
+                {
+                    "read_timeout": 10,
+                    "write_timeout": 10,
+                }
+            )
         engine_options.update(
             {
                 "pool_size": 10,
@@ -147,6 +152,20 @@ def init_database() -> None:
             finally:
                 lock_connection.execute(
                     text("SELECT RELEASE_LOCK('xianyu_admin_schema_init')")
+                )
+        return
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as lock_connection:
+            # One application container still starts API and worker processes.
+            # The session-level advisory lock serializes their schema bootstrap.
+            lock_connection.execute(
+                text("SELECT pg_advisory_lock(796119750610954733)")
+            )
+            try:
+                _initialize_schema()
+            finally:
+                lock_connection.execute(
+                    text("SELECT pg_advisory_unlock(796119750610954733)")
                 )
         return
     _initialize_schema()
@@ -657,9 +676,9 @@ def _copy_legacy_auto_reply_data(
                             "(:user_id, :enabled, NULL, :default_reply_enabled, :default_reply_text, "
                             ":cooldown_seconds, :match_strategy, :allowlist, :blocklist, :ai_enabled, "
                             ":ai_base_url, :ai_api_key, :ai_model, :ai_system_prompt, "
-                            ":ai_context_messages, 0, 0.4, :created_at, :updated_at)"
+                            ":ai_context_messages, :ai_include_images, 0.4, :created_at, :updated_at)"
                         ),
-                        values,
+                        {**values, "ai_include_images": False},
                     )
                 initialized_users.add(user_id)
 
@@ -1173,7 +1192,7 @@ def _normalize_order_sync_metadata(target_engine: Engine) -> None:
         )
         connection.execute(
             text(
-                "UPDATE xianyu_orders SET platform_confirmed = 1, sync_state = 'confirmed' "
+                "UPDATE xianyu_orders SET platform_confirmed = TRUE, sync_state = 'confirmed' "
                 "WHERE data_source IN ('seller_sold', 'buyer_bought')"
             )
         )
@@ -1272,7 +1291,7 @@ def _backfill_headinfo_order_metadata(target_engine: Engine) -> None:
                 refund_sql = ", refund_status = 'pending'"
             connection.execute(
                 text(
-                    "UPDATE xianyu_orders SET platform_confirmed = 1, "
+                    "UPDATE xianyu_orders SET platform_confirmed = TRUE, "
                     "sync_state = 'confirmed', headinfo_confirmed_at = :confirmed_at, "
                     "platform_capabilities = :capabilities, platform_action_links = :links"
                     f"{refund_sql} WHERE order_pk = :order_pk"
@@ -1316,7 +1335,7 @@ def _backfill_headinfo_order_metadata(target_engine: Engine) -> None:
                 refund_sql = ", refund_status = 'pending'"
             connection.execute(
                 text(
-                    "UPDATE xianyu_orders SET platform_confirmed = 1, "
+                    "UPDATE xianyu_orders SET platform_confirmed = TRUE, "
                     "sync_state = 'confirmed', "
                     "data_source = CASE WHEN data_source IN "
                     "('seller_sold', 'buyer_bought') THEN data_source ELSE 'headinfo' END"
@@ -1372,7 +1391,7 @@ def _migrate_legacy_account_proxies(target_engine: Engine) -> None:
             )
             connection.execute(
                 text(
-                    "UPDATE xianyu_accounts SET proxy_id = :proxy_id, proxy_enabled = 0, "
+                    "UPDATE xianyu_accounts SET proxy_id = :proxy_id, proxy_enabled = FALSE, "
                     "proxy_host = NULL, proxy_port = NULL, proxy_username = NULL, "
                     "proxy_password = NULL WHERE account_id = :account_id"
                 ),
@@ -1380,7 +1399,7 @@ def _migrate_legacy_account_proxies(target_engine: Engine) -> None:
             )
         connection.execute(
             text(
-                "UPDATE xianyu_accounts SET proxy_enabled = 0, proxy_host = NULL, "
+                "UPDATE xianyu_accounts SET proxy_enabled = FALSE, proxy_host = NULL, "
                 "proxy_port = NULL, proxy_username = NULL, proxy_password = NULL "
                 "WHERE proxy_id IS NOT NULL"
             )
@@ -1513,7 +1532,8 @@ def _normalize_migrated_defaults(target_engine: Engine) -> None:
                         "last_outbound_at = CASE WHEN last_message_direction = 'outbound' "
                         "THEN last_message_at ELSE last_outbound_at END, "
                         "needs_reply = CASE WHEN last_message_direction = 'inbound' "
-                        "AND last_message_type IN ('text', 'image', 'audio', 'unknown') THEN 1 ELSE 0 END "
+                        "AND last_message_type IN ('text', 'image', 'audio', 'unknown') "
+                        "THEN TRUE ELSE FALSE END "
                         "WHERE last_inbound_at IS NULL AND last_outbound_at IS NULL"
                     )
                 )
@@ -1558,6 +1578,7 @@ def _normalize_cookie_renewal_metadata(target_engine: Engine) -> None:
     renewal_columns = {
         column["name"] for column in inspector.get_columns("xianyu_cookie_renewals")
     }
+    trigger_column = target_engine.dialect.identifier_preparer.quote("trigger")
     with target_engine.begin() as connection:
         if "phase" in renewal_columns:
             connection.execute(
@@ -1589,7 +1610,7 @@ def _normalize_cookie_renewal_metadata(target_engine: Engine) -> None:
             connection.execute(
                 text(
                     "UPDATE xianyu_cookie_renewals SET last_verified_source = "
-                    "COALESCE(`trigger`, 'legacy_renewal') "
+                    f"COALESCE({trigger_column}, 'legacy_renewal') "
                     "WHERE last_verified_source IS NULL AND last_verified_at IS NOT NULL"
                 )
             )
@@ -1653,7 +1674,7 @@ def _normalize_cookie_renewal_metadata(target_engine: Engine) -> None:
             connection.execute(
                 text(
                     "INSERT INTO xianyu_cookie_renewal_attempts "
-                    "(attempt_id, account_id, `trigger`, state, phase, message, error_kind, "
+                    f"(attempt_id, account_id, {trigger_column}, state, phase, message, error_kind, "
                     "updated_cookie_names, runtime_applied, started_at, finished_at, "
                     "next_attempt_at, created_at, updated_at) VALUES "
                     "(:attempt_id, :account_id, :trigger, :state, :phase, :message, "

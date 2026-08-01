@@ -20,7 +20,7 @@ class RuntimeSecretTests(unittest.TestCase):
             environment = {
                 "XIANYU_RUNTIME_SECRET_DIR": str(secret_dir),
                 "XIANYU_GENERATED_SECRETS": (
-                    "jwt-secret,mysql-root-password,mysql-password,redis-password"
+                    "jwt-secret,postgres-root-password,postgres-password,redis-password"
                 ),
             }
             with patch.dict(os.environ, environment, clear=True):
@@ -40,8 +40,8 @@ class RuntimeSecretTests(unittest.TestCase):
                 set(first),
                 {
                     "jwt-secret",
-                    "mysql-root-password",
-                    "mysql-password",
+                    "postgres-root-password",
+                    "postgres-password",
                     "redis-password",
                 },
             )
@@ -50,12 +50,12 @@ class RuntimeSecretTests(unittest.TestCase):
     def test_missing_secret_is_not_regenerated_over_existing_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            data = root / "mysql"
+            data = root / "postgres"
             data.mkdir()
             (data / "ibdata1").write_text("existing", encoding="utf-8")
             environment = {
                 "XIANYU_RUNTIME_SECRET_DIR": str(root / "secrets"),
-                "XIANYU_GENERATED_SECRETS": "mysql-password",
+                "XIANYU_GENERATED_SECRETS": "postgres-password",
                 "XIANYU_SECRET_GUARD_DIRS": str(data),
             }
             with patch.dict(os.environ, environment, clear=True):
@@ -65,20 +65,20 @@ class RuntimeSecretTests(unittest.TestCase):
     def test_existing_deployment_can_seed_original_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            data = root / "mysql"
+            data = root / "postgres"
             data.mkdir()
             (data / "ibdata1").write_text("existing", encoding="utf-8")
             environment = {
                 "XIANYU_RUNTIME_SECRET_DIR": str(root / "secrets"),
-                "XIANYU_GENERATED_SECRETS": "mysql-password",
+                "XIANYU_GENERATED_SECRETS": "postgres-password",
                 "XIANYU_SECRET_GUARD_DIRS": str(data),
-                "MYSQL_PASSWORD": "original-database-password",
+                "POSTGRES_PASSWORD": "original-database-password",
             }
             with patch.dict(os.environ, environment, clear=True):
                 initialize_runtime_secrets()
 
             self.assertEqual(
-                (root / "secrets" / "mysql-password")
+                (root / "secrets" / "postgres-password")
                 .read_text(encoding="utf-8")
                 .strip(),
                 "original-database-password",
@@ -88,17 +88,25 @@ class RuntimeSecretTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             secret_dir = Path(temporary)
             (secret_dir / "jwt-secret").write_text("jwt-value\n", encoding="utf-8")
-            (secret_dir / "mysql-password").write_text("mysql/value\n", encoding="utf-8")
+            (secret_dir / "postgres-password").write_text("postgres/value\n", encoding="utf-8")
             (secret_dir / "redis-password").write_text("redis:value\n", encoding="utf-8")
             environment = {
                 "XIANYU_RUNTIME_SECRET_DIR": str(secret_dir),
-                "XIANYU_DATABASE_HOST": "mysql",
+                "XIANYU_DATABASE_HOST": "postgres",
                 "XIANYU_REDIS_HOST": "redis",
             }
             with patch.dict(os.environ, environment, clear=True):
                 load_runtime_environment()
                 self.assertEqual(os.environ["XIANYU_JWT_SECRET"], "jwt-value")
-                self.assertIn("mysql%2Fvalue@mysql:3306", os.environ["XIANYU_DATABASE_URL"])
+                self.assertIn(
+                    "postgres%2Fvalue@postgres:5432",
+                    os.environ["XIANYU_DATABASE_URL"],
+                )
+                self.assertTrue(
+                    os.environ["XIANYU_DATABASE_URL"].startswith(
+                        "postgresql+psycopg://"
+                    )
+                )
                 self.assertIn("redis%3Avalue@redis:6379/0", os.environ["XIANYU_REDIS_URL"])
 
 
@@ -116,7 +124,7 @@ class LocalEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / ".env.local"
             target.write_text(
-                "XIANYU_DATABASE_URL=mysql+pymysql://db\n"
+                "XIANYU_DATABASE_URL=postgresql+psycopg://db\n"
                 "XIANYU_REDIS_URL=redis://cache\n"
                 "# XIANYU_JWT_SECRET=\n",
                 encoding="utf-8",

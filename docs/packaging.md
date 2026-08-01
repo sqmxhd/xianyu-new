@@ -2,13 +2,15 @@
 
 ## 发布契约
 
-流水线保持 `test -> docker` 两个阶段。Docker 阶段只构建闲鱼管理平台自身：
+流水线只有 `test -> docker` 两个阶段。`test` 阶段保留 `backend`、`frontend` 和
+`portability` 三个并行验证作业；它们不是部署容器。Docker 阶段只处理同一个闲鱼
+项目镜像：
 
 - `image-amd64` 推送 Registry 镜像；
 - `archive-amd64` 导出同版本的 `linux/amd64` Docker 镜像压缩包。
 
-`tg` 分支自动发布完整提交 SHA、`1.0.<pipeline-iid>` 和 `latest`。`main`、其他分支、
-合并请求和 Git Tag 只执行测试，不创建 Docker 发布任务。
+`tg` 分支自动发布完整提交 SHA、`1.0.<pipeline-iid>` 和 `latest`。`main`、其他
+分支、合并请求和 Git Tag 只执行验证，不显示发布作业。
 
 下载产物为：
 
@@ -19,34 +21,43 @@ xianyu-admin-1.0.315-linux-amd64.docker.tar.gz.sha256
 compose.all.yml
 ```
 
-流水线不下载 Chatwoot 源码，也不构建或打包 Chatwoot、MySQL、Redis、PostgreSQL。
+流水线不下载 Chatwoot 源码，也不构建或打包 Chatwoot、PostgreSQL 或 Redis。
+
+## 最终运行结构
+
+完整部署固定为 5 个常驻容器：
+
+```text
+xianyu-app               # 前端、FastAPI、Worker、两个 HTTPS 入口
+xianyu-database          # 共享 pgvector/PostgreSQL
+xianyu-redis             # 共享 Redis
+xianyu-chatwoot          # 官方 Chatwoot Rails
+xianyu-chatwoot-worker   # 官方 Chatwoot Sidekiq
+```
+
+PostgreSQL 中使用 `xianyu_admin`、`chatwoot` 两个数据库和两个独立用户。Redis 的
+闲鱼平台使用逻辑库 0，Chatwoot 使用逻辑库 1。数据库、Redis、Rails、API、VNC 和
+CDP 都不发布宿主机端口。`xianyu-app` 只发布闲鱼平台和 Chatwoot 两个 HTTPS 端口。
+
+Chatwoot 保持官方 Rails/Sidekiq 两容器结构，使用同一个官方镜像，不制作补丁镜像。
+数据库初始化通过 `docker compose run --rm` 临时执行，不留下初始化容器。
 
 ## 首次部署
 
-目标主机需要 Linux amd64、Docker Engine、Docker Compose v2 和 OpenSSL。将本项目
-镜像压缩包、校验文件、`开始部署.sh` 与 `compose.all.yml` 放在同一目录后执行：
+目标主机需要 Linux amd64、Docker Engine、Docker Compose v2 和 OpenSSL。将镜像
+压缩包、校验文件、`开始部署.sh` 与 `compose.all.yml` 放在同一目录：
 
 ```bash
 chmod +x 开始部署.sh
 ./开始部署.sh
 ```
 
-脚本会：
+脚本会验证并导入项目镜像，选择在线拉取或本地导入官方依赖镜像，创建同级
+`XIANYU_DATA`，配置两个 HTTPS 端口和 URL，生成密钥，建立两个 PostgreSQL 数据库，
+执行 Chatwoot 官方初始化，最后启动并检查 5 个常驻容器。
 
-1. 验证并导入本项目镜像；
-2. 选择在线拉取或本地导入官方依赖镜像；
-3. 在同级创建 `XIANYU_DATA`；
-4. 配置监听 IP、闲鱼 HTTPS 端口，以及启用 Chatwoot 时的 Chatwoot HTTPS 端口；
-5. 自动生成应用、数据库和 Chatwoot 密钥；
-6. 自动生成或手动导入证书；
-7. 使用固定 `xianyu` 容器和网络名称启动服务并等待健康检查。
-
-MySQL、本项目 Redis、Chatwoot PostgreSQL 和 Chatwoot Redis 均使用脚本生成的
-独立密码；这些端口不发布到宿主机。
-
-默认端口为闲鱼平台 `6161`、Chatwoot `6443`。默认端口被占用时脚本会推荐下一个
-可用端口。Compose 只发布两个 HTTPS 网关；API、数据库、Redis、队列、VNC 和 CDP
-都只在容器内部使用。
+默认端口为闲鱼平台 `6161`、Chatwoot `6443`。端口被占用时脚本推荐下一个可用
+端口。正式 `docker compose up` 使用 `pull_policy: never`，不会隐式联网。
 
 ## 官方依赖镜像
 
@@ -54,37 +65,30 @@ MySQL、本项目 Redis、Chatwoot PostgreSQL 和 Chatwoot Redis 均使用脚本
 
 ```text
 chatwoot/chatwoot:v4.16.0
-mysql:8.4
 redis:7.4-alpine
 pgvector/pgvector:pg16
 ```
 
-在线模式使用 `docker pull`。本地模式从脚本同级目录选择通过 `docker save` 导出的
-`.tar` 或 `.tar.gz` 文件并执行 `docker load`。两种模式最终都统一标记为：
+在线模式执行 `docker pull`。本地模式选择通过 `docker save` 导出的 `.tar` 或
+`.tar.gz` 并执行 `docker load`，然后统一标记为：
 
 ```text
 xianyu-local/chatwoot:4.16.0
-xianyu-local/mysql:8.4
 xianyu-local/redis:7.4-alpine
 xianyu-local/pgvector:pg16
 ```
 
-Compose 对全部镜像使用 `pull_policy: never`，正式启动阶段不会隐式联网。官方依赖
-镜像通过“官方依赖镜像管理”单独更新，不随本项目版本升级。
-
 ## 本地化目录
-
-所有持久化内容固定保存到部署文件同级目录：
 
 ```text
 XIANYU_DATA/
 ├── config/                     # 端口、URL、镜像标签
 ├── state/                      # 当前项目版本
-├── releases/                  # 已导入的项目版本记录
-├── secrets/                   # 应用与 Chatwoot 密钥
+├── releases/                   # 已导入的项目版本记录
+├── secrets/                   # 应用、数据库与 Chatwoot 密钥
 ├── certificates/              # CA、信任链和两个站点证书
-├── mysql/
-├── redis/
+├── postgres/                   # 两套系统共用的 PostgreSQL
+├── redis/                      # 两套系统共用的 Redis
 ├── product-images/
 ├── contact-avatars/
 ├── notification-sounds/
@@ -92,34 +96,35 @@ XIANYU_DATA/
 ├── fingerprint-chromium/
 ├── standard-chromium/
 └── chatwoot/
-    ├── postgres/
-    ├── redis/
     └── storage/
 ```
 
-重新创建容器或升级镜像不会删除这些目录。
+升级镜像不会覆盖这些目录。
 
 ## 证书管理
 
 首次部署可以使用 OpenSSL 自动生成内部根 CA、中间 CA 和网站证书，也可以手动导入。
 自动生成支持 IP、域名或混合 SAN。根证书有效期固定到 `9999-12-31 23:59:59 UTC`，
-网站证书可选 1、3、5、10 年。根 CA 私钥只存放在 `XIANYU_DATA/certificates/ca/private`。
+网站证书可选 1、3、5、10 年。两套网站证书都由 `xianyu-app` 的 Nginx 使用；根 CA
+信任链同时挂载到项目和两个官方 Chatwoot 容器。
 
-## 升级
+## 升级和旧 MySQL 数据
 
-本项目升级只导入新的 `xianyu-admin-*.docker.tar.gz`，更新当前项目镜像标签并重新协调
-服务。它不会修改官方依赖镜像、端口、URL、证书、密钥或持久化数据。
+项目升级只导入新的 `xianyu-admin-*.docker.tar.gz` 并协调当前堆栈，不修改端口、
+URL、证书、密钥和持久化数据。官方依赖镜像通过脚本单独更新。
 
-Chatwoot、MySQL、Redis 和 pgvector 使用“官方依赖镜像管理”独立更新。停止服务只
-停止当前 `xianyu` Compose 堆栈，不执行全局清理命令。
+新 ALL 部署统一使用 PostgreSQL。旧版 MySQL 数据不能通过替换 Compose 文件直接
+切换；必须先执行一次性数据迁移并核对记录，再停用旧 MySQL。部署脚本不会自动删除
+旧 `mysql/` 目录；检测到旧 MySQL 数据而新 PostgreSQL 仍为空时还会拒绝启动，避免
+把空数据库误认为升级后的数据。
 
 ## Chatwoot 撤回边界
 
 只运行官方 Chatwoot。网页端和手机端删除已映射的公开客服消息后，Chatwoot 发出
-标准 `message_updated` Webhook；本项目调用闲鱼撤回，并通过官方消息 API 创建
-私密原消息快照。不存在定制 Chatwoot 菜单、接口、补丁或镜像。
+标准 Webhook；本项目调用闲鱼撤回并创建私密原消息快照。不存在定制 Chatwoot
+菜单、接口、补丁或镜像。
 
 ## Runner 约束
 
-容器任务只需要带 `docker` 标签并支持 rootless BuildKit 的 Linux Runner，不再需要
+容器任务只需要带 `docker` 标签并支持 rootless BuildKit 的 Linux Runner，不需要
 Windows 或原生 Linux 二进制打包 Runner。CI 不安装或覆盖 Runner 的内部根证书。

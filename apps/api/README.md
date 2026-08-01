@@ -4,10 +4,10 @@ Phase 1-15 Web 后端，提供账户、SOCKS5 代理、批量启动/停止、运
 
 ## 数据库
 
-使用 `.env.local` 配置数据库。当前实测使用 MySQL：
+使用 `.env.local` 配置数据库。容器生产部署使用 PostgreSQL，源码开发兼容 MySQL：
 
 ```bash
-export XIANYU_DATABASE_URL='mysql+pymysql://user:password@mysql-host:3306/xianyu_admin?charset=utf8mb4'
+export XIANYU_DATABASE_URL='postgresql+psycopg://user:password@postgres-host:5432/xianyu_admin'
 ```
 
 服务启动时会自动创建基础表：
@@ -45,7 +45,7 @@ npm run start:api
 
 - `apps/api/requirements.txt` 是后台 API 依赖。
 - `integrations/xianyu_core/requirements.txt` 是真实闲鱼连接依赖。
-- `XIANYU_DATABASE_URL` 使用 MySQL。
+- `XIANYU_DATABASE_URL` 生产使用 PostgreSQL；已有源码开发环境可继续使用 MySQL。
 - 必须设置 `XIANYU_JWT_SECRET`，用于用户名/密码登录后的 JWT 签名。
 - 设置 `XIANYU_CORS_ORIGINS` 可覆盖后台允许的 CORS 来源，多个来源用逗号分隔。
 - `third_party/XianYuApis` 不在这里修改。
@@ -190,6 +190,6 @@ GET /api/audit-logs
 说明：
 
 - 后台任务固定使用 `XIANYU_REDIS_URL` 对应的 Redis 和服务端队列名，不提供运行时关闭或改名接口。
-- Redis 队列只传递 `task_id`，MySQL 的 `xianyu_background_tasks` 仍是任务 payload、状态和结果的数据源。
-- Worker 会扫描 MySQL 中遗漏投递的待执行任务，避免 Redis 消息丢失后任务永久滞留。
+- Redis 队列只传递 `task_id`，数据库的 `xianyu_background_tasks` 仍是任务 payload、状态和结果的数据源。
+- Worker 会扫描数据库中遗漏投递的待执行任务，避免 Redis 消息丢失后任务永久滞留。
 - POST/PUT/DELETE API 会自动写审计日志。

@@ -21,17 +21,28 @@ class PackagingContractTests(unittest.TestCase):
         docker_jobs = (root / ".gitlab" / "ci" / "docker.yml").read_text(
             encoding="utf-8"
         )
+        test_jobs = (root / ".gitlab" / "ci" / "test.yml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("stages:\n  - test\n  - docker", pipeline)
         self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
         self.assertIn("archive-amd64:", docker_jobs)
+        self.assertIn("backend:", test_jobs)
+        self.assertIn("\nfrontend:", test_jobs)
+        self.assertIn("\nportability:", test_jobs)
+        self.assertNotIn("\nverify:", test_jobs)
+        self.assertEqual(docker_jobs.count("- job: backend"), 2)
+        self.assertEqual(docker_jobs.count("- job: frontend"), 2)
+        self.assertEqual(docker_jobs.count("- job: portability"), 2)
         self.assertNotIn("chatwoot-source-amd64:", docker_jobs)
         self.assertNotIn("chatwoot-image-amd64:", docker_jobs)
         self.assertIn(".container-delivery:", common_jobs)
         self.assertIn('$CI_COMMIT_BRANCH == "tg"', common_jobs)
         self.assertNotIn('$CI_COMMIT_BRANCH == "main"', common_jobs)
+        self.assertNotIn("when: manual", common_jobs)
         self.assertNotIn("$CI_COMMIT_TAG", common_jobs)
         self.assertNotIn("$CI_DEFAULT_BRANCH", common_jobs)
         self.assertIn("$CI_REGISTRY_IMAGE:latest", docker_jobs)
@@ -97,7 +108,8 @@ class PackagingContractTests(unittest.TestCase):
         )
         self.assertIn('Path("/data/web-notification-sounds")', entrypoint)
         self.assertIn('Path("/data/contact-avatars")', entrypoint)
-        self.assertIn('"chatwoot-gateway"', entrypoint)
+        self.assertIn('if role == "app"', entrypoint)
+        self.assertIn("run_application_stack", entrypoint)
 
     def test_container_deployment_has_no_fixed_public_origin(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -119,49 +131,66 @@ class PackagingContractTests(unittest.TestCase):
         )
         for contents in (compose, compose_all):
             self.assertNotIn("\n    build:", contents)
-            self.assertIn(
-                'XIANYU_FINGERPRINT_BROWSER_MAX_ARCHIVE_BYTES: "536870912"',
-                contents,
-            )
             self.assertIn("max-size: \"20m\"", contents)
             self.assertIn("max-file: \"5\"", contents)
 
-        self.assertEqual(compose.count("pull_policy: always"), 4)
-        self.assertEqual(compose.count("platform: linux/amd64"), 4)
+        self.assertEqual(compose.count("pull_policy: always"), 1)
+        self.assertEqual(compose.count("platform: linux/amd64"), 1)
         self.assertIn(
             "web-notification-sounds:/data/web-notification-sounds", compose
         )
         self.assertIn("runtime-secrets:/run/xianyu-secrets", compose)
         self.assertIn("./config/tls:/run/secrets/xianyu-tls:ro", compose)
+        self.assertIn("container_name: xianyu-app", compose)
+        self.assertNotIn("\n  worker:", compose)
+        self.assertNotIn("\n  gateway:", compose)
 
         self.assertNotIn("pull_policy: always", compose_all)
-        self.assertEqual(compose_all.count("pull_policy: never"), 10)
+        self.assertEqual(compose_all.count("pull_policy: never"), 4)
         self.assertIn("${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}", compose_all)
         self.assertIn("/contact-avatars:/data/contact-avatars", compose_all)
-        self.assertIn("/chatwoot/postgres:/var/lib/postgresql/data", compose_all)
+        self.assertIn("/postgres:/var/lib/postgresql/data", compose_all)
         self.assertIn("certificates/xianyu", compose_all)
         self.assertIn("certificates/chatwoot", compose_all)
-        self.assertIn("container_name: xianyu-api", compose_all)
-        self.assertIn("container_name: xianyu-worker", compose_all)
+        self.assertIn("container_name: xianyu-app", compose_all)
+        self.assertIn("container_name: xianyu-database", compose_all)
+        self.assertIn("container_name: xianyu-redis", compose_all)
         self.assertIn("container_name: xianyu-chatwoot", compose_all)
-        self.assertIn("name: xianyu_frontend", compose_all)
-        self.assertIn("name: xianyu_backend", compose_all)
-        self.assertIn("name: xianyu_chatwoot", compose_all)
+        self.assertIn("container_name: xianyu-chatwoot-worker", compose_all)
+        self.assertIn("name: xianyu_internal", compose_all)
         self.assertIn("\n  chatwoot-rails:", compose_all)
         self.assertIn("\n  chatwoot-sidekiq:", compose_all)
-        self.assertIn("\n  chatwoot-gateway:", compose_all)
-        self.assertIn("profiles: [chatwoot]", compose_all)
+        self.assertNotIn("\n  chatwoot-gateway:", compose_all)
+        self.assertNotIn("\n  init-config:", compose_all)
+        self.assertNotIn("\n  chatwoot-prepare:", compose_all)
 
         self.assertNotIn("\n  mysql:", compose)
         self.assertNotIn("\n  redis:", compose)
-        self.assertIn("\n  mysql:", compose_all)
+        self.assertNotIn("\n  mysql:", compose_all)
+        self.assertIn("\n  postgres:", compose_all)
         self.assertIn("\n  redis:", compose_all)
-        self.assertIn("MYSQL_PASSWORD_FILE:", compose_all)
-        self.assertIn("MYSQL_ROOT_PASSWORD_FILE:", compose_all)
+        self.assertIn("POSTGRES_PASSWORD_FILE:", compose_all)
         self.assertNotIn("REDIS_URL: redis://chatwoot-redis:6379", compose_all)
-        self.assertIn(
-            "jwt-secret,mysql-root-password,mysql-password,redis-password",
-            compose_all,
+        self.assertIn("XIANYU_REDIS_DATABASE: \"0\"", compose_all)
+        self.assertIn("POSTGRES_DATABASE: chatwoot", compose_all)
+        services_block = compose_all.split("services:\n", 1)[1].split(
+            "\nnetworks:\n", 1
+        )[0]
+        self.assertEqual(
+            {
+                line.strip().removesuffix(":")
+                for line in services_block.splitlines()
+                if line.startswith("  ")
+                and not line.startswith("    ")
+                and line.strip().endswith(":")
+            },
+            {
+                "postgres",
+                "redis",
+                "xianyu-app",
+                "chatwoot-rails",
+                "chatwoot-sidekiq",
+            },
         )
         self.assertEqual(
             [
@@ -183,10 +212,14 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("在线拉取官方镜像", deploy)
         self.assertIn("导入本地官方镜像包", deploy)
         self.assertIn("chatwoot/chatwoot:v4.16.0", deploy)
-        self.assertIn("mysql:8.4", deploy)
+        self.assertNotIn("mysql:8.4", deploy)
         self.assertIn("redis:7.4-alpine", deploy)
         self.assertIn("pgvector/pgvector:pg16", deploy)
-        self.assertIn("REDIS_URL=redis://:%s@chatwoot-redis:6379", deploy)
+        self.assertIn("REDIS_URL=redis://:%s@redis:6379/1", deploy)
+        self.assertIn("initialize_shared_databases", deploy)
+        self.assertIn("guard_legacy_mysql_data", deploy)
+        self.assertIn("旧数据未被修改", deploy)
+        self.assertIn("bundle exec rails db:chatwoot_prepare", deploy)
         self.assertIn("证书管理", deploy)
         self.assertIn("99991231235959Z", deploy)
         self.assertIn("CHATWOOT_HTTPS_PORT", deploy)
@@ -197,6 +230,21 @@ class PackagingContractTests(unittest.TestCase):
         self.assertFalse(
             (root / "tools" / "package" / "BundleImage.Dockerfile").exists()
         )
+
+    def test_postgresql_runtime_is_packaged_for_the_shared_database(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "apps" / "api" / "requirements.txt").read_text(
+            encoding="utf-8"
+        )
+        spec = (root / "tools" / "package" / "xianyu.spec").read_text(
+            encoding="utf-8"
+        )
+        database = (
+            root / "apps" / "api" / "xianyu_admin_api" / "database.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("psycopg[binary]>=3.2,<4", requirements)
+        self.assertIn('"sqlalchemy.dialects.postgresql.psycopg"', spec)
+        self.assertNotIn("`trigger`", database)
 
     def test_gateway_limits_browser_archives_without_widening_general_api(
         self,

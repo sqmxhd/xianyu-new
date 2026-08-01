@@ -81,13 +81,12 @@ COPY integrations/ /app/integrations/
 COPY third_party/XianYuApis/ /app/third_party/XianYuApis/
 COPY tools/ /app/tools/
 COPY deploy/nginx/xianyu-container.conf /app/deploy/nginx/xianyu-container.conf
-COPY deploy/nginx/chatwoot-container.conf /app/deploy/nginx/chatwoot-container.conf
 COPY .env.example README.md /app/
 COPY --from=frontend /src/apps/admin/dist /app/apps/admin/dist
 
 RUN python -m tools.package.entry verify
 
-EXPOSE 8000 8443
+EXPOSE 8000 8443 8444
 VOLUME ["/data/product-images", "/data/contact-avatars", "/data/web-notification-sounds", "/data/browser-profiles", "/data/fingerprint-chromium", "/data/standard-chromium"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "python", "/app/tools/container_entry.py"]

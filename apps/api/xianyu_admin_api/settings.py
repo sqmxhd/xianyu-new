@@ -34,10 +34,10 @@ def env_bool(name: str, default: bool) -> bool:
 class Settings:
     """Environment-backed settings.
 
-    ``XIANYU_DATABASE_URL`` accepts any SQLAlchemy URL. Production should use
-    MySQL, for example:
+    ``XIANYU_DATABASE_URL`` accepts any SQLAlchemy URL. Container production
+    uses PostgreSQL, for example:
 
-    ``mysql+pymysql://user:password@127.0.0.1:3306/xianyu_admin?charset=utf8mb4``
+    ``postgresql+psycopg://user:password@127.0.0.1:5432/xianyu_admin``
     """
 
     database_url: str = required_env("XIANYU_DATABASE_URL")

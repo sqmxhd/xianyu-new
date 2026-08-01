@@ -50,41 +50,71 @@ ensure_layout() {
     secrets/xianyu \
     certificates/ca/private certificates/ca/certs certificates/trust \
     certificates/xianyu certificates/chatwoot \
-    mysql redis product-images contact-avatars notification-sounds \
+    postgres redis product-images contact-avatars notification-sounds \
     browser-profiles fingerprint-chromium standard-chromium \
-    chatwoot/postgres chatwoot/redis chatwoot/storage
+    chatwoot/storage
   do
     mkdir -p "$DEPLOY_ROOT/$directory"
   done
-  chmod 700 "$DEPLOY_ROOT/secrets" "$DEPLOY_ROOT/secrets/xianyu" \
+  chmod 700 "$DEPLOY_ROOT/secrets" \
     "$DEPLOY_ROOT/certificates/ca/private"
+  chmod 755 "$DEPLOY_ROOT/secrets/xianyu"
+}
+
+guard_legacy_mysql_data() {
+  local legacy="$DEPLOY_ROOT/mysql" postgres="$DEPLOY_ROOT/postgres"
+  if [ -d "$legacy" ] \
+    && [ -n "$(find "$legacy" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] \
+    && [ -z "$(find "$postgres" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    fail "检测到旧版 MySQL 数据，但共享 PostgreSQL 尚未迁移。为避免空库启动，脚本已停止；请先完成一次性 MySQL 到 PostgreSQL 数据迁移。旧数据未被修改。"
+  fi
 }
 
 random_secret() {
   openssl rand -hex "${1:-48}"
 }
 
-ensure_chatwoot_secrets() {
-  local target="$DEPLOY_ROOT/secrets/chatwoot.env" temporary redis_password
-  if [ -s "$target" ]; then
-    if ! grep -q '^REDIS_URL=' "$target"; then
-      redis_password="$(sed -n 's/^REDIS_PASSWORD=//p' "$target" | tail -n 1)"
-      [ -n "$redis_password" ] || fail "Chatwoot 密钥文件缺少 REDIS_PASSWORD"
-      [[ "$redis_password" =~ ^[A-Fa-f0-9]+$ ]] ||
-        fail "Chatwoot REDIS_PASSWORD 不是脚本生成的安全格式，无法自动升级"
-      printf '\nREDIS_URL=redis://:%s@chatwoot-redis:6379\n' "$redis_password" >> "$target"
-      chmod 600 "$target"
-      success "已补齐 Chatwoot Redis 认证地址"
+ensure_platform_secrets() {
+  local name path
+  local -a names=(jwt-secret postgres-root-password postgres-password redis-password)
+  ensure_layout
+  for name in "${names[@]}"; do
+    path="$DEPLOY_ROOT/secrets/xianyu/$name"
+    if [ ! -s "$path" ]; then
+      if [ -d "$DEPLOY_ROOT/postgres" ] && [ -n "$(find "$DEPLOY_ROOT/postgres" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+        fail "共享 PostgreSQL 已有数据但密钥 $name 缺失，请恢复原密钥"
+      fi
+      umask 077
+      random_secret 48 > "$path.tmp.$$"
+      printf '\n' >> "$path.tmp.$$"
+      chmod 444 "$path.tmp.$$"
+      mv -f "$path.tmp.$$" "$path"
     fi
+  done
+  success "平台、共享 PostgreSQL 和 Redis 密钥已就绪"
+}
+
+ensure_chatwoot_secrets() {
+  local target="$DEPLOY_ROOT/secrets/chatwoot.env" temporary redis_password postgres_password
+  redis_password="$(tr -d '\r\n' < "$DEPLOY_ROOT/secrets/xianyu/redis-password")"
+  if [ -s "$target" ]; then
+    postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$target" | tail -n 1)"
+    [ -n "$postgres_password" ] || postgres_password="$(random_secret 32)"
+    temporary="$target.tmp.$$"
+    grep -Ev '^(POSTGRES_PASSWORD|REDIS_PASSWORD|REDIS_URL)=' "$target" > "$temporary" || true
+    {
+      printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password"
+      printf 'REDIS_URL=redis://:%s@redis:6379/1\n' "$redis_password"
+    } >> "$temporary"
+    chmod 600 "$temporary"
+    mv -f "$temporary" "$target"
     return 0
   fi
   temporary="$target.tmp.$$"
   umask 077
-  redis_password="$(random_secret 32)"
   {
     printf 'POSTGRES_PASSWORD=%s\n' "$(random_secret 32)"
-    printf 'REDIS_PASSWORD=%s\n' "$redis_password"
-    printf 'REDIS_URL=redis://:%s@chatwoot-redis:6379\n' "$redis_password"
+    printf 'REDIS_URL=redis://:%s@redis:6379/1\n' "$redis_password"
     printf 'SECRET_KEY_BASE=%s\n' "$(random_secret 64)"
     printf 'ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=%s\n' "$(random_secret 32)"
     printf 'ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=%s\n' "$(random_secret 32)"
@@ -92,7 +122,7 @@ ensure_chatwoot_secrets() {
   } > "$temporary"
   chmod 600 "$temporary"
   mv -f "$temporary" "$target"
-  success "已生成 Chatwoot 数据库和应用密钥"
+  success "已生成 Chatwoot 数据库和应用密钥，并接入共享 Redis"
 }
 
 validate_port() {
@@ -152,28 +182,14 @@ prompt_value() {
 
 configure_deployment() {
   local bind_ip xianyu_port chatwoot_port
-  local xianyu_url chatwoot_url enable_chatwoot old_xianyu_port old_chatwoot_port target
-  local chatwoot_default chatwoot_choice suggested_xianyu_port suggested_chatwoot_port
+  local xianyu_url chatwoot_url old_xianyu_port old_chatwoot_port target
+  local suggested_xianyu_port suggested_chatwoot_port
 
   old_xianyu_port="$(read_config_value XIANYU_HTTPS_PORT)"
   old_chatwoot_port="$(read_config_value CHATWOOT_HTTPS_PORT)"
   bind_ip="$(prompt_value '对外监听 IP' "$(read_config_value XIANYU_BIND_IP || true)")"
   bind_ip="${bind_ip:-0.0.0.0}"
   validate_bind_ip "$bind_ip" || fail "监听 IP 格式不正确：$bind_ip"
-
-  enable_chatwoot="$(read_config_value COMPOSE_PROFILES || true)"
-  if [ "$enable_chatwoot" = chatwoot ]; then
-    chatwoot_default=1
-  else
-    chatwoot_default=2
-  fi
-  printf '内置官方 Chatwoot：1) 启用  2) 不启用\n'
-  chatwoot_choice="$(prompt_value '请选择' "$chatwoot_default")"
-  case "$chatwoot_choice" in
-    1) enable_chatwoot=chatwoot ;;
-    2) enable_chatwoot= ;;
-    *) fail "Chatwoot 选择无效" ;;
-  esac
 
   if [ -n "$old_xianyu_port" ]; then
     suggested_xianyu_port="$old_xianyu_port"
@@ -186,41 +202,29 @@ configure_deployment() {
     fail "端口 $xianyu_port 已被占用"
   fi
 
-  chatwoot_port="${old_chatwoot_port:-6443}"
-  if [ "$enable_chatwoot" = chatwoot ]; then
-    if [ -n "$old_chatwoot_port" ]; then
-      suggested_chatwoot_port="$old_chatwoot_port"
-    else
-      suggested_chatwoot_port="$(available_port 6443 "$xianyu_port")"
-    fi
-    chatwoot_port="$(prompt_value 'Chatwoot HTTPS 端口' "$suggested_chatwoot_port")"
-    validate_port "$chatwoot_port" || fail "Chatwoot 端口必须为 1-65535"
-    [ "$chatwoot_port" != "$xianyu_port" ] || fail "两个 HTTPS 端口不能相同"
-    if [ "$chatwoot_port" != "$old_chatwoot_port" ] && port_is_busy "$chatwoot_port"; then
-      fail "端口 $chatwoot_port 已被占用"
-    fi
+  if [ -n "$old_chatwoot_port" ]; then
+    suggested_chatwoot_port="$old_chatwoot_port"
+  else
+    suggested_chatwoot_port="$(available_port 6443 "$xianyu_port")"
+  fi
+  chatwoot_port="$(prompt_value 'Chatwoot HTTPS 端口' "$suggested_chatwoot_port")"
+  validate_port "$chatwoot_port" || fail "Chatwoot 端口必须为 1-65535"
+  [ "$chatwoot_port" != "$xianyu_port" ] || fail "两个 HTTPS 端口不能相同"
+  if [ "$chatwoot_port" != "$old_chatwoot_port" ] && port_is_busy "$chatwoot_port"; then
+    fail "端口 $chatwoot_port 已被占用"
   fi
 
   xianyu_url="$(prompt_value '浏览器访问闲鱼管理平台的完整地址' "$(read_config_value XIANYU_PUBLIC_BASE_URL || true)")"
   xianyu_url="${xianyu_url:-https://127.0.0.1:$xianyu_port}"
   validate_https_url "$xianyu_url" || fail "平台地址必须是完整 HTTPS URL"
 
-  chatwoot_url="$(read_config_value CHATWOOT_PUBLIC_BASE_URL || true)"
-  if [ "$enable_chatwoot" = chatwoot ]; then
-    chatwoot_url="$(prompt_value '浏览器访问 Chatwoot 的完整地址' "$chatwoot_url")"
-    chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
-    validate_https_url "$chatwoot_url" || fail "Chatwoot 地址必须是完整 HTTPS URL"
-  else
-    chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
-  fi
+  chatwoot_url="$(prompt_value '浏览器访问 Chatwoot 的完整地址' "$(read_config_value CHATWOOT_PUBLIC_BASE_URL || true)")"
+  chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
+  validate_https_url "$chatwoot_url" || fail "Chatwoot 地址必须是完整 HTTPS URL"
 
   printf '\n即将对外开放：\n'
   printf '  闲鱼管理平台：%s:%s -> %s\n' "$bind_ip" "$xianyu_port" "$xianyu_url"
-  if [ "$enable_chatwoot" = chatwoot ]; then
-    printf '  Chatwoot：%s:%s -> %s\n' "$bind_ip" "$chatwoot_port" "$chatwoot_url"
-  else
-    printf '  Chatwoot：本次不启动\n'
-  fi
+  printf '  Chatwoot：%s:%s -> %s\n' "$bind_ip" "$chatwoot_port" "$chatwoot_url"
   confirm "确认保存以上端口和地址配置？" || fail "已取消配置修改"
 
   target="$DEPLOY_ROOT/config/deployment.env"
@@ -229,7 +233,6 @@ configure_deployment() {
     printf '# 此文件由“开始部署.sh”维护。升级版本包不会覆盖。\n'
     printf 'DEPLOY_ROOT=%s\n' "$DEPLOY_ROOT"
     printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME"
-    printf 'COMPOSE_PROFILES=%s\n' "$enable_chatwoot"
     printf 'XIANYU_BIND_IP=%s\n' "$bind_ip"
     printf 'XIANYU_HTTPS_PORT=%s\n' "$xianyu_port"
     printf 'XIANYU_PUBLIC_BASE_URL=%s\n' "$xianyu_url"
@@ -376,7 +379,7 @@ prepare_official_image() {
 }
 
 prepare_dependency_images() {
-  local mode="${1:-}" choice enabled target="$DEPLOY_ROOT/config/images.env"
+  local mode="${1:-}" choice target="$DEPLOY_ROOT/config/images.env"
   if [ -z "$mode" ]; then
     printf '\n官方依赖镜像来源：\n'
     printf '  1) 在线拉取官方镜像\n'
@@ -389,22 +392,16 @@ prepare_dependency_images() {
     esac
   fi
 
-  prepare_official_image "$mode" MySQL mysql mysql:8.4 xianyu-local/mysql:8.4
+  prepare_official_image "$mode" pgvector pgvector pgvector/pgvector:pg16 xianyu-local/pgvector:pg16
   prepare_official_image "$mode" Redis redis redis:7.4-alpine xianyu-local/redis:7.4-alpine
-  enabled="$(read_config_value COMPOSE_PROFILES || true)"
-  if [ "$enabled" = chatwoot ]; then
-    prepare_official_image "$mode" Chatwoot chatwoot chatwoot/chatwoot:v4.16.0 xianyu-local/chatwoot:4.16.0
-    prepare_official_image "$mode" pgvector pgvector pgvector/pgvector:pg16 xianyu-local/pgvector:pg16
-  fi
+  prepare_official_image "$mode" Chatwoot chatwoot chatwoot/chatwoot:v4.16.0 xianyu-local/chatwoot:4.16.0
 
   umask 077
   {
     printf '# 官方镜像由“开始部署.sh”拉取或导入后统一标记。\n'
-    printf 'MYSQL_IMAGE=xianyu-local/mysql:8.4\n'
+    printf 'POSTGRES_IMAGE=xianyu-local/pgvector:pg16\n'
     printf 'REDIS_IMAGE=xianyu-local/redis:7.4-alpine\n'
     printf 'CHATWOOT_IMAGE=xianyu-local/chatwoot:4.16.0\n'
-    printf 'CHATWOOT_POSTGRES_IMAGE=xianyu-local/pgvector:pg16\n'
-    printf 'CHATWOOT_REDIS_IMAGE=xianyu-local/redis:7.4-alpine\n'
   } > "$target.tmp.$$"
   chmod 600 "$target.tmp.$$"
   mv -f "$target.tmp.$$" "$target"
@@ -417,7 +414,7 @@ current_version() {
 }
 
 compose() {
-  local version release_file images_file profile
+  local version release_file images_file
   local -a compose_args
   version="$(current_version)"
   [ -n "$version" ] || fail "尚未安装版本包"
@@ -433,26 +430,17 @@ compose() {
     --env-file "$images_file"
     -f "$COMPOSE_FILE"
   )
-  profile="$(read_config_value COMPOSE_PROFILES || true)"
-  if [ "$profile" = chatwoot ]; then
-    compose_args+=(--profile chatwoot)
-  fi
   docker compose "${compose_args[@]}" "$@"
 }
 
 verify_runtime_images() {
   local release_file="$DEPLOY_ROOT/state/current-release.env"
   local images_file="$DEPLOY_ROOT/config/images.env"
-  local profile name reference
-  local -a names=(XIANYU_IMAGE MYSQL_IMAGE REDIS_IMAGE)
+  local name reference
+  local -a names=(XIANYU_IMAGE POSTGRES_IMAGE REDIS_IMAGE CHATWOOT_IMAGE)
 
   [ -f "$release_file" ] || fail "尚未安装版本包"
   [ -f "$images_file" ] || fail "尚未准备官方依赖镜像"
-  profile="$(read_config_value COMPOSE_PROFILES || true)"
-  if [ "$profile" = chatwoot ]; then
-    names+=(CHATWOOT_IMAGE CHATWOOT_POSTGRES_IMAGE CHATWOOT_REDIS_IMAGE)
-  fi
-
   for name in "${names[@]}"; do
     if [ "$name" = XIANYU_IMAGE ]; then
       reference="$(sed -n "s/^${name}=//p" "$release_file" | tail -n 1)"
@@ -463,6 +451,43 @@ verify_runtime_images() {
     docker image inspect "$reference" >/dev/null 2>&1 ||
       fail "本地镜像不可用：$reference；请先导入版本包或运行“官方依赖镜像管理”"
   done
+}
+
+initialize_shared_databases() {
+  local xianyu_password chatwoot_password
+  xianyu_password="$(tr -d '\r\n' < "$DEPLOY_ROOT/secrets/xianyu/postgres-password")"
+  chatwoot_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$DEPLOY_ROOT/secrets/chatwoot.env" | tail -n 1)"
+  [[ "$xianyu_password" =~ ^[A-Fa-f0-9]+$ ]] ||
+    fail "闲鱼 PostgreSQL 密钥格式无效"
+  [[ "$chatwoot_password" =~ ^[A-Fa-f0-9]+$ ]] ||
+    fail "Chatwoot PostgreSQL 密钥格式无效"
+
+  info "正在初始化共享 PostgreSQL 的独立数据库和用户"
+  compose exec -T postgres psql --username postgres --dbname postgres \
+    --set=ON_ERROR_STOP=1 <<SQL
+SELECT format('CREATE ROLE xianyu_app LOGIN PASSWORD %L', '$xianyu_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'xianyu_app') \gexec
+ALTER ROLE xianyu_app WITH LOGIN PASSWORD '$xianyu_password';
+SELECT 'CREATE DATABASE xianyu_admin OWNER xianyu_app'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'xianyu_admin') \gexec
+ALTER DATABASE xianyu_admin OWNER TO xianyu_app;
+
+SELECT format('CREATE ROLE chatwoot LOGIN PASSWORD %L', '$chatwoot_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chatwoot') \gexec
+ALTER ROLE chatwoot WITH LOGIN PASSWORD '$chatwoot_password';
+SELECT 'CREATE DATABASE chatwoot OWNER chatwoot'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'chatwoot') \gexec
+ALTER DATABASE chatwoot OWNER TO chatwoot;
+SQL
+  compose exec -T postgres psql --username postgres --dbname chatwoot \
+    --set=ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+  success "共享 PostgreSQL 已准备：xianyu_admin、chatwoot"
+}
+
+prepare_chatwoot_database() {
+  info "正在执行 Chatwoot 官方数据库初始化/升级"
+  compose run --rm --no-deps chatwoot-rails \
+    bundle exec rails db:chatwoot_prepare
 }
 
 refresh_combined_ca() {
@@ -742,30 +767,31 @@ certificate_management() {
     *) fail "选择无效" ;;
   esac
   if [ -n "$(current_version)" ] && compose ps --status running -q 2>/dev/null | grep -q .; then
-    if confirm "证书已更新，是否立即重启 HTTPS 网关？"; then
-      compose restart gateway
-      if [ "$(read_config_value COMPOSE_PROFILES || true)" = chatwoot ]; then
-        compose restart chatwoot-gateway
-      fi
+    if confirm "证书已更新，是否立即重启统一应用网关？"; then
+      compose restart xianyu-app
     fi
   fi
 }
 
 start_stack() {
   certificate_ready || fail "证书配置不完整，请先进入“证书管理”"
+  guard_legacy_mysql_data
+  ensure_platform_secrets
   ensure_chatwoot_secrets
   verify_runtime_images
-  info "正在启动当前版本；Compose 只使用脚本已准备好的本地镜像"
+  info "正在启动共享 PostgreSQL 和 Redis"
+  compose up -d --wait postgres redis
+  initialize_shared_databases
+  prepare_chatwoot_database
+  info "正在启动 5 个常驻容器；Compose 只使用脚本已准备好的本地镜像"
   compose up -d --wait --remove-orphans
   success "服务已启动"
   printf '闲鱼管理平台：%s\n' "$(read_config_value XIANYU_PUBLIC_BASE_URL)"
-  if [ "$(read_config_value COMPOSE_PROFILES)" = chatwoot ]; then
-    printf 'Chatwoot：%s\n' "$(read_config_value CHATWOOT_PUBLIC_BASE_URL)"
-  fi
+  printf 'Chatwoot：%s\n' "$(read_config_value CHATWOOT_PUBLIC_BASE_URL)"
 }
 
 stop_stack() {
-  compose --profile chatwoot stop
+  compose stop
   success "服务已停止，数据和配置均已保留"
 }
 
@@ -779,9 +805,7 @@ upgrade_stack() {
   import_package "$package" true
   after="$(current_version)"
   if [ -f "$DEPLOY_ROOT/config/deployment.env" ] && certificate_ready; then
-    ensure_chatwoot_secrets
-    verify_runtime_images
-    compose up -d --wait --remove-orphans
+    start_stack
     success "已从 ${before:-未安装} 升级到 $after"
   else
     success "版本 $after 已安装；完成配置和证书后即可启动"
@@ -808,6 +832,7 @@ first_deployment() {
   import_package "$package" true
   configure_deployment
   prepare_dependency_images
+  ensure_platform_secrets
   ensure_chatwoot_secrets
   initial_certificate_setup
   start_stack
@@ -818,7 +843,7 @@ dependency_image_management() {
   prepare_dependency_images
   if [ -n "$(current_version)" ] && compose ps --status running -q 2>/dev/null | grep -q .; then
     if confirm "依赖镜像已更新，是否立即重建相关容器？"; then
-      compose up -d --wait --remove-orphans
+      start_stack
       success "官方依赖容器已更新"
     fi
   fi

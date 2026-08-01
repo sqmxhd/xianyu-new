@@ -19,7 +19,8 @@ Recommended production path:
 .env.local    # 实际私有值，由首次启动创建并被 Git 忽略
 ```
 
-源码模式只需要填写外部 MySQL、Redis 地址，JWT 由 `npm run dev` 首次自动生成。
+源码模式只需要填写外部 PostgreSQL、Redis 地址，JWT 由 `npm run dev` 首次自动生成；
+已有开发环境仍兼容 MySQL。
 Docker 配置、ALL 零参数启动和完整参数分类见
 [`configuration.md`](configuration.md)。不要提交 `.env.local`、`.env.docker` 或任何
 真实密钥，也不要创建用途不明确的 `.env`。
@@ -39,10 +40,10 @@ npm run build
 
 ## Database
 
-Create the database before first start:
+Create the PostgreSQL database before first start:
 
 ```sql
-CREATE DATABASE xianyu_admin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE xianyu_admin;
 ```
 
 The API creates/extends tables on startup using the current lightweight migration layer.
@@ -198,7 +199,7 @@ Minimum production checks:
 - systemd logs: `journalctl -u xianyu-api -f`, `journalctl -u xianyu-worker -f`
 - workspace/container logs: `data/logs/api.log`, `data/logs/worker.log`,
   `data/logs/watchdog.log`
-- MySQL backup: dump `xianyu_admin`
+- Database backup: dump `xianyu_admin`
 - product image backup: include the directory configured by `XIANYU_PRODUCT_IMAGE_DIR`
 - custom browser sound backup: include `XIANYU_WEB_NOTIFICATION_SOUND_DIR`
 - env backup: store `.env.local` securely outside git

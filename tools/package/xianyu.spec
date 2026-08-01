@@ -50,6 +50,7 @@ hiddenimports = sorted(
             "blackboxprotobuf",
             "execjs",
             "sqlalchemy.dialects.mysql.pymysql",
+            "sqlalchemy.dialects.postgresql.psycopg",
             "sqlalchemy.dialects.sqlite",
             "uvicorn.logging",
             "uvicorn.loops.auto",
