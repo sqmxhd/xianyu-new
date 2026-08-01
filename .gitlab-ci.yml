@@ -17,7 +17,7 @@ variables:
   PYTHON_IMAGE_TAG: "3.13-slim-bookworm"
   NODE_IMAGE_TAG: "20.19.2-bookworm-slim"
   BUILDKIT_IMAGE_TAG: "v0.24.0-rootless"
-  # 完整离线包版本系列；需要进入 2.x 时只修改这一项。
+  # Docker 镜像版本系列；需要进入 2.x 时只修改这一项。
   RELEASE_SERIES: "1.0"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   npm_config_cache: "$CI_PROJECT_DIR/.cache/npm"

@@ -33,8 +33,15 @@ config/tls/*
 config/ca/*
 !config/ca/README.md
 
-# “开始部署.sh”的本机状态和下载的离线版本包。
-.xianyu-deploy-root
-xianyu-deployment/
-xianyu-*-linux-amd64.tar.gz
-xianyu-*-linux-amd64.tar.gz.sha256
+# “开始部署.sh”的本机数据和下载的 Docker 镜像包。
+XIANYU_DATA/
+xianyu-admin-*-linux-amd64.docker.tar.gz
+xianyu-admin-*-linux-amd64.docker.tar.gz.sha256
+chatwoot-*.tar
+chatwoot-*.tar.gz
+mysql-*.tar
+mysql-*.tar.gz
+redis-*.tar
+redis-*.tar.gz
+pgvector-*.tar
+pgvector-*.tar.gz

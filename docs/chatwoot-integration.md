@@ -71,8 +71,8 @@ Webhook 使用 Chatwoot 的 `X-Chatwoot-Timestamp`、`X-Chatwoot-Signature` 和
   或具体失败原因。Chatwoot 原生的“此消息已被删除”占位仍会保留
 - 快照通过 Chatwoot 消息 ID 幂等关联；图片或快照写入失败时后台重试快照，
   已确认的闲鱼撤回不会重复执行。该链路不依赖 Chatwoot Nginx 反向代理
-- 使用支持 `xianyu_recall` 的定制 Chatwoot 时，明确的“撤回”操作仍会保留原消息，
-  并在原消息上回写撤回状态
+- 本项目只支持官方 Chatwoot：网页端和手机端均通过原生“删除”触发闲鱼撤回，
+  不依赖定制菜单、定制接口或定制镜像
 - Chatwoot 客服回复后，会话进入永久人工接管；Chatwoot resolved 后释放接管
 - Chatwoot 坐席在电脑端或手机端查看会话后，本项目清除所有启用用户在该会话上的
   个人未查看标记，但保留闲鱼平台返回的原始未读基线，也不会清除“待回复”状态

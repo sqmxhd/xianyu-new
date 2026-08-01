@@ -20,31 +20,6 @@
         "$CI_DEPENDENCY_PROXY_SERVER" "$proxy_auth" \
         > "$HOME/.docker/config.json"
 
-# 定制 Chatwoot 源码固定为 v4.16.0；TG 流水线中应用本仓库补丁后再构建。
-chatwoot-source-amd64:
-  stage: docker
-  extends: [.container-delivery]
-  image:
-    name: "${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:${NODE_IMAGE_TAG}"
-    entrypoint: [""]
-  tags: [docker]
-  script:
-    - |
-      set -eu
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends git
-      rm -rf /var/lib/apt/lists/*
-      git clone --depth 1 --branch v4.16.0 https://github.com/chatwoot/chatwoot.git .chatwoot
-      git -C .chatwoot apply "$CI_PROJECT_DIR/deploy/chatwoot/patches/0001-disable-api-inbox-outbound-audio.patch"
-      git -C .chatwoot apply "$CI_PROJECT_DIR/deploy/chatwoot/patches/0002-add-xianyu-message-recall.patch"
-      mkdir -p artifacts
-      tar -czf artifacts/chatwoot-v4.16.0-xianyu-source.tar.gz -C .chatwoot .
-  artifacts:
-    expire_in: 1 day
-    paths:
-      - artifacts/chatwoot-v4.16.0-xianyu-source.tar.gz
-
 image-amd64:
   extends: [.buildkit, .container-delivery]
   needs:
@@ -59,6 +34,12 @@ image-amd64:
       set -eu
       version="${RELEASE_SERIES}.${CI_PIPELINE_IID}"
       names="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,$CI_REGISTRY_IMAGE:$version,$CI_REGISTRY_IMAGE:latest"
+      case "$version" in
+        ""|[.-]*|*[!A-Za-z0-9_.-]*)
+          echo "Invalid container version tag: $version" >&2
+          exit 1
+          ;;
+      esac
       buildctl-daemonless.sh build \
         --frontend dockerfile.v0 \
         --local context=. \
@@ -72,83 +53,44 @@ image-amd64:
         --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64,mode=max" \
         --output "type=image,\"name=$names\",push=true"
 
-chatwoot-image-amd64:
-  extends: [.buildkit, .container-delivery]
-  needs:
-    - job: chatwoot-source-amd64
-      artifacts: true
-  script:
-    - |
-      set -eu
-      mkdir -p .chatwoot
-      tar -xzf artifacts/chatwoot-v4.16.0-xianyu-source.tar.gz -C .chatwoot
-      chatwoot_image="$CI_REGISTRY_IMAGE/chatwoot:4.16.0-xianyu-$CI_COMMIT_SHA"
-      buildctl-daemonless.sh build \
-        --frontend dockerfile.v0 \
-        --local context=.chatwoot \
-        --local dockerfile=.chatwoot/docker \
-        --opt filename=Dockerfile \
-        --opt platform=linux/amd64 \
-        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:chatwoot-linux-amd64" \
-        --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:chatwoot-linux-amd64,mode=max" \
-        --output "type=image,name=$chatwoot_image,push=true"
-
-# 生成唯一的完整版本包：应用、定制 Chatwoot、MySQL、Redis、pgvector 和部署文件。
 archive-amd64:
   extends: [.buildkit, .container-delivery]
   needs:
-    - job: image-amd64
+    - job: backend
       artifacts: false
-    - job: chatwoot-image-amd64
+    - job: frontend
+      artifacts: false
+    - job: portability
       artifacts: false
   script:
     - |
       set -eu
       version="${RELEASE_SERIES}.${CI_PIPELINE_IID}"
-      mkdir -p artifacts/images
-
-      export_image() {
-        source_image="$1"
-        target_image="$2"
-        archive_name="$3"
-        buildctl-daemonless.sh build \
-          --frontend dockerfile.v0 \
-          --local context=. \
-          --local dockerfile=tools/package \
-          --opt filename=BundleImage.Dockerfile \
-          --opt platform=linux/amd64 \
-          --opt "build-arg:SOURCE_IMAGE=$source_image" \
-          --output "type=docker,name=$target_image,dest=artifacts/images/$archive_name.docker.tar"
-        gzip -9 "artifacts/images/$archive_name.docker.tar"
-      }
-
-      xianyu_image="xianyu/xianyu-admin:$version"
-      mysql_image="xianyu/mysql:8.4"
-      redis_image="xianyu/redis:7.4-alpine"
-      chatwoot_image="xianyu/chatwoot:4.16.0-xianyu-$CI_COMMIT_SHORT_SHA"
-      postgres_image="xianyu/pgvector:pg16"
-
-      export_image "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$xianyu_image" xianyu-admin
-      export_image "$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/mysql:8.4" "$mysql_image" mysql
-      export_image "$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/redis:7.4-alpine" "$redis_image" redis
-      export_image "$CI_REGISTRY_IMAGE/chatwoot:4.16.0-xianyu-$CI_COMMIT_SHA" "$chatwoot_image" chatwoot
-      export_image "$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/pgvector/pgvector:pg16" "$postgres_image" pgvector
-
-      RELEASE_VERSION="$version" \
-      RELEASE_COMMIT="$CI_COMMIT_SHA" \
-      IMAGE_ARCHIVE_DIR="$CI_PROJECT_DIR/artifacts/images" \
-      OUTPUT_DIR="$CI_PROJECT_DIR/artifacts" \
-      XIANYU_IMAGE="$xianyu_image" \
-      MYSQL_IMAGE="$mysql_image" \
-      REDIS_IMAGE="$redis_image" \
-      CHATWOOT_IMAGE="$chatwoot_image" \
-      CHATWOOT_POSTGRES_IMAGE="$postgres_image" \
-      CHATWOOT_REDIS_IMAGE="$redis_image" \
-        bash tools/package/assemble_offline_bundle.sh
+      case "$version" in
+        ""|[.-]*|*[!A-Za-z0-9_.-]*)
+          echo "Invalid archive version tag: $version" >&2
+          exit 1
+          ;;
+      esac
+      archive="xianyu-admin-$version-linux-amd64.docker.tar"
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=Dockerfile \
+        --opt platform=linux/amd64 \
+        --opt "build-arg:BASE_IMAGE_PREFIX=$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX" \
+        --opt "build-arg:BUILD_VERSION=$version" \
+        --opt "build-arg:BUILD_COMMIT=$CI_COMMIT_SHA" \
+        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/cache:linux-amd64" \
+        --output "type=docker,name=xianyu/xianyu-admin:$version,dest=$archive"
+      gzip -9 "$archive"
+      sha256sum "$archive.gz" > "$archive.gz.sha256"
   artifacts:
-    name: "xianyu-${CI_COMMIT_SHORT_SHA}-linux-amd64"
+    name: "xianyu-admin-${CI_COMMIT_SHORT_SHA}-linux-amd64-docker"
     expire_in: 14 days
     paths:
-      - artifacts/xianyu-*-linux-amd64.tar.gz
-      - artifacts/xianyu-*-linux-amd64.tar.gz.sha256
-      - artifacts/开始部署.sh
+      - xianyu-admin-*-linux-amd64.docker.tar.gz
+      - xianyu-admin-*-linux-amd64.docker.tar.gz.sha256
+      - 开始部署.sh
+      - compose.all.yml

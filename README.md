@@ -49,7 +49,7 @@ GitLab 测试、Docker 镜像发布和 Docker Compose 部署说明见
 npm run dev
 ```
 
-正式 Docker 部署使用 `tg` 流水线生成的单一完整版本包。把以下三个文件放在
+正式 Docker 部署使用 `tg` 流水线生成的本项目镜像包。把以下四个文件放在
 同一目录后运行脚本：
 
 ```bash
@@ -59,14 +59,15 @@ chmod +x 开始部署.sh
 
 ```text
 开始部署.sh
-xianyu-<版本>-linux-amd64.tar.gz
-xianyu-<版本>-linux-amd64.tar.gz.sha256
+compose.all.yml
+xianyu-admin-<版本>-linux-amd64.docker.tar.gz
+xianyu-admin-<版本>-linux-amd64.docker.tar.gz.sha256
 ```
 
-同一个版本包既用于首次部署，也用于后续升级；不再区分“全量包”和“升级包”。
-它包含本项目、定制 Chatwoot、MySQL、Redis、pgvector PostgreSQL 和 Compose。
-部署脚本不会执行 `docker pull`，会在首次部署时询问外部端口、URL 和证书方案，
-并把数据、密钥、证书及配置保存在宿主机部署目录中。升级不会覆盖这些内容。
+同一个项目镜像包既用于首次部署，也用于后续升级。Chatwoot、MySQL、Redis 和
+pgvector 不进入本项目包；部署时可选择在线拉取官方镜像，或导入事先保存的官方
+镜像归档。脚本会询问外部端口、URL 和证书方案，并把数据、密钥、证书及配置
+固定保存在同级 `XIANYU_DATA`。升级不会覆盖这些内容。
 
 只启动项目容器并使用已有的外部 MySQL、Redis：
 
@@ -78,13 +79,14 @@ docker compose --env-file .env.docker pull
 docker compose --env-file .env.docker up -d --wait --remove-orphans
 ```
 
-离线部署默认建议闲鱼平台使用 `6161`、Chatwoot 使用 `6443`；最终端口和公开
+一键部署默认建议闲鱼平台使用 `6161`、Chatwoot 使用 `6443`；最终端口和公开
 HTTPS 地址均在部署过程中确认。MySQL、Redis、PostgreSQL、API 等内部服务不发布
 宿主机端口。
 
-只有 `tg` 分支执行镜像发布和完整版本包归档；`main` 不再显示或执行发布任务。
-Registry 中应用镜像同时发布 `latest`，完整版本包和 SHA-256 校验文件保留 14 天。
-离线导入、证书和数据目录说明见
+只有小写 `tg` 分支执行镜像发布及镜像包归档；`main`、其他分支和 Git Tag
+不显示或执行发布任务。
+Registry 中应用镜像同时发布 `latest`，镜像包和 SHA-256 校验文件保留 14 天。
+本地镜像导入、证书和数据目录说明见
 [`docs/packaging.md`](docs/packaging.md)。
 
 ## 配置文件
@@ -93,7 +95,7 @@ Registry 中应用镜像同时发布 `latest`，完整版本包和 SHA-256 校�
 - `.env.docker.example`：Docker 外部 MySQL、Redis 模板，同样只有两项必填。
 - `.env.local`、`.env.docker`：实际私有配置，已加入 `.gitignore`，不要提交。
 - `compose.yml`：仅项目容器、连接外部 MySQL/Redis 的高级入口。
-- `compose.all.yml`：离线版本包内部定义，由 `开始部署.sh` 管理，不需要手工填写 ENV。
+- `compose.all.yml`：官方依赖与本项目的一键部署定义，由 `开始部署.sh` 管理，不需要手工填写 ENV。
 
 所有参数的中文分类、默认值和风险说明见
 [`docs/configuration.md`](docs/configuration.md)。

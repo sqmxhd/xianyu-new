@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 闲鱼管理平台离线部署入口。
-# 本脚本只读取同级目录中的 xianyu-<版本>-linux-amd64.tar.gz，绝不拉取镜像。
+# 闲鱼管理平台 Docker 部署入口。
+# 本项目镜像从同级压缩包导入；官方依赖镜像可在线拉取或从本地归档导入。
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT_POINTER="$SCRIPT_DIR/.xianyu-deploy-root"
-DEFAULT_DEPLOY_ROOT="$SCRIPT_DIR/xianyu-deployment"
-PACKAGE_GLOB="xianyu-*-linux-amd64.tar.gz"
+DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"
+COMPOSE_FILE="$SCRIPT_DIR/compose.all.yml"
+PACKAGE_GLOB="xianyu-admin-*-linux-amd64.docker.tar.gz"
+COMPOSE_PROJECT_NAME="xianyu"
 
 info() { printf '\033[1;34m[信息]\033[0m %s\n' "$*"; }
 success() { printf '\033[1;32m[完成]\033[0m %s\n' "$*"; }
@@ -32,34 +33,6 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
 }
 
-deployment_root() {
-  if [ -n "${XIANYU_DEPLOY_ROOT:-}" ]; then
-    printf '%s\n' "$XIANYU_DEPLOY_ROOT"
-  elif [ -f "$ROOT_POINTER" ]; then
-    sed -n '1p' "$ROOT_POINTER"
-  else
-    printf '%s\n' "$DEFAULT_DEPLOY_ROOT"
-  fi
-}
-
-set_deployment_root() {
-  local root="$1"
-  case "$root" in
-    *$'\n'*|*'#'*|*'$'*|*'`'*|*'"'*|*"'"*|*'\\'*)
-      fail "部署目录不能包含换行、#、引号、反斜杠、$ 或反引号"
-      ;;
-  esac
-  mkdir -p "$root"
-  root="$(cd -- "$root" && pwd -P)"
-  printf '%s\n' "$root" > "$ROOT_POINTER"
-  chmod 600 "$ROOT_POINTER"
-  DEPLOY_ROOT="$root"
-}
-
-load_deployment_root() {
-  DEPLOY_ROOT="$(deployment_root)"
-}
-
 ensure_dependencies() {
   require_command docker
   require_command openssl
@@ -67,6 +40,7 @@ ensure_dependencies() {
   require_command gzip
   require_command sha256sum
   docker compose version >/dev/null 2>&1 || fail "需要 Docker Compose v2（docker compose）"
+  [ -f "$COMPOSE_FILE" ] || fail "缺少 Docker 配置文件：$COMPOSE_FILE"
 }
 
 ensure_layout() {
@@ -76,11 +50,9 @@ ensure_layout() {
     secrets/xianyu \
     certificates/ca/private certificates/ca/certs certificates/trust \
     certificates/xianyu certificates/chatwoot \
-    data/xianyu/mysql data/xianyu/redis data/xianyu/product-images \
-    data/xianyu/contact-avatars data/xianyu/notification-sounds \
-    data/xianyu/browser-profiles data/xianyu/fingerprint-chromium \
-    data/xianyu/standard-chromium \
-    data/chatwoot/postgres data/chatwoot/redis data/chatwoot/storage
+    mysql redis product-images contact-avatars notification-sounds \
+    browser-profiles fingerprint-chromium standard-chromium \
+    chatwoot/postgres chatwoot/redis chatwoot/storage
   do
     mkdir -p "$DEPLOY_ROOT/$directory"
   done
@@ -93,13 +65,26 @@ random_secret() {
 }
 
 ensure_chatwoot_secrets() {
-  local target="$DEPLOY_ROOT/secrets/chatwoot.env" temporary
-  [ -s "$target" ] && return 0
+  local target="$DEPLOY_ROOT/secrets/chatwoot.env" temporary redis_password
+  if [ -s "$target" ]; then
+    if ! grep -q '^REDIS_URL=' "$target"; then
+      redis_password="$(sed -n 's/^REDIS_PASSWORD=//p' "$target" | tail -n 1)"
+      [ -n "$redis_password" ] || fail "Chatwoot 密钥文件缺少 REDIS_PASSWORD"
+      [[ "$redis_password" =~ ^[A-Fa-f0-9]+$ ]] ||
+        fail "Chatwoot REDIS_PASSWORD 不是脚本生成的安全格式，无法自动升级"
+      printf '\nREDIS_URL=redis://:%s@chatwoot-redis:6379\n' "$redis_password" >> "$target"
+      chmod 600 "$target"
+      success "已补齐 Chatwoot Redis 认证地址"
+    fi
+    return 0
+  fi
   temporary="$target.tmp.$$"
   umask 077
+  redis_password="$(random_secret 32)"
   {
     printf 'POSTGRES_PASSWORD=%s\n' "$(random_secret 32)"
-    printf 'REDIS_PASSWORD=%s\n' "$(random_secret 32)"
+    printf 'REDIS_PASSWORD=%s\n' "$redis_password"
+    printf 'REDIS_URL=redis://:%s@chatwoot-redis:6379\n' "$redis_password"
     printf 'SECRET_KEY_BASE=%s\n' "$(random_secret 64)"
     printf 'ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=%s\n' "$(random_secret 32)"
     printf 'ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=%s\n' "$(random_secret 32)"
@@ -134,10 +119,23 @@ validate_https_url() {
 port_is_busy() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
-    ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"
-  else
-    return 1
+    if ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
+      return 0
+    fi
   fi
+  docker ps --format '{{.Ports}}' 2>/dev/null | grep -Eq ":${port}->"
+}
+
+available_port() {
+  local candidate="$1" reserved="${2:-}"
+  while [ "$candidate" -le 65535 ]; do
+    if [ "$candidate" != "$reserved" ] && ! port_is_busy "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate=$((candidate + 1))
+  done
+  fail "没有找到可用的宿主机端口"
 }
 
 read_config_value() {
@@ -153,8 +151,9 @@ prompt_value() {
 }
 
 configure_deployment() {
-  local existing="${1:-false}" bind_ip xianyu_port chatwoot_port
+  local bind_ip xianyu_port chatwoot_port
   local xianyu_url chatwoot_url enable_chatwoot old_xianyu_port old_chatwoot_port target
+  local chatwoot_default chatwoot_choice suggested_xianyu_port suggested_chatwoot_port
 
   old_xianyu_port="$(read_config_value XIANYU_HTTPS_PORT)"
   old_chatwoot_port="$(read_config_value CHATWOOT_HTTPS_PORT)"
@@ -162,41 +161,58 @@ configure_deployment() {
   bind_ip="${bind_ip:-0.0.0.0}"
   validate_bind_ip "$bind_ip" || fail "监听 IP 格式不正确：$bind_ip"
 
-  xianyu_port="$(prompt_value '闲鱼管理平台 HTTPS 端口' "${old_xianyu_port:-6161}")"
-  validate_port "$xianyu_port" || fail "闲鱼平台端口必须为 1-65535"
-  if [ "$xianyu_port" != "$old_xianyu_port" ] && port_is_busy "$xianyu_port"; then
-    fail "端口 $xianyu_port 已被占用"
-  fi
-
-  chatwoot_port="$(prompt_value 'Chatwoot HTTPS 端口' "${old_chatwoot_port:-6443}")"
-  validate_port "$chatwoot_port" || fail "Chatwoot 端口必须为 1-65535"
-  [ "$chatwoot_port" != "$xianyu_port" ] || fail "两个 HTTPS 端口不能相同"
-  if [ "$chatwoot_port" != "$old_chatwoot_port" ] && port_is_busy "$chatwoot_port"; then
-    fail "端口 $chatwoot_port 已被占用"
-  fi
-
-  xianyu_url="$(prompt_value '浏览器访问闲鱼管理平台的完整地址' "$(read_config_value XIANYU_PUBLIC_BASE_URL || true)")"
-  xianyu_url="${xianyu_url:-https://127.0.0.1:$xianyu_port}"
-  validate_https_url "$xianyu_url" || fail "平台地址必须是完整 HTTPS URL"
-
-  chatwoot_url="$(prompt_value '浏览器访问 Chatwoot 的完整地址' "$(read_config_value CHATWOOT_PUBLIC_BASE_URL || true)")"
-  chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
-  validate_https_url "$chatwoot_url" || fail "Chatwoot 地址必须是完整 HTTPS URL"
-
   enable_chatwoot="$(read_config_value COMPOSE_PROFILES || true)"
-  local chatwoot_default chatwoot_choice
   if [ "$enable_chatwoot" = chatwoot ]; then
     chatwoot_default=1
   else
     chatwoot_default=2
   fi
-  printf '内置 Chatwoot：1) 启用  2) 不启用\n'
+  printf '内置官方 Chatwoot：1) 启用  2) 不启用\n'
   chatwoot_choice="$(prompt_value '请选择' "$chatwoot_default")"
   case "$chatwoot_choice" in
     1) enable_chatwoot=chatwoot ;;
     2) enable_chatwoot= ;;
     *) fail "Chatwoot 选择无效" ;;
   esac
+
+  if [ -n "$old_xianyu_port" ]; then
+    suggested_xianyu_port="$old_xianyu_port"
+  else
+    suggested_xianyu_port="$(available_port 6161)"
+  fi
+  xianyu_port="$(prompt_value '闲鱼管理平台 HTTPS 端口' "$suggested_xianyu_port")"
+  validate_port "$xianyu_port" || fail "闲鱼平台端口必须为 1-65535"
+  if [ "$xianyu_port" != "$old_xianyu_port" ] && port_is_busy "$xianyu_port"; then
+    fail "端口 $xianyu_port 已被占用"
+  fi
+
+  chatwoot_port="${old_chatwoot_port:-6443}"
+  if [ "$enable_chatwoot" = chatwoot ]; then
+    if [ -n "$old_chatwoot_port" ]; then
+      suggested_chatwoot_port="$old_chatwoot_port"
+    else
+      suggested_chatwoot_port="$(available_port 6443 "$xianyu_port")"
+    fi
+    chatwoot_port="$(prompt_value 'Chatwoot HTTPS 端口' "$suggested_chatwoot_port")"
+    validate_port "$chatwoot_port" || fail "Chatwoot 端口必须为 1-65535"
+    [ "$chatwoot_port" != "$xianyu_port" ] || fail "两个 HTTPS 端口不能相同"
+    if [ "$chatwoot_port" != "$old_chatwoot_port" ] && port_is_busy "$chatwoot_port"; then
+      fail "端口 $chatwoot_port 已被占用"
+    fi
+  fi
+
+  xianyu_url="$(prompt_value '浏览器访问闲鱼管理平台的完整地址' "$(read_config_value XIANYU_PUBLIC_BASE_URL || true)")"
+  xianyu_url="${xianyu_url:-https://127.0.0.1:$xianyu_port}"
+  validate_https_url "$xianyu_url" || fail "平台地址必须是完整 HTTPS URL"
+
+  chatwoot_url="$(read_config_value CHATWOOT_PUBLIC_BASE_URL || true)"
+  if [ "$enable_chatwoot" = chatwoot ]; then
+    chatwoot_url="$(prompt_value '浏览器访问 Chatwoot 的完整地址' "$chatwoot_url")"
+    chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
+    validate_https_url "$chatwoot_url" || fail "Chatwoot 地址必须是完整 HTTPS URL"
+  else
+    chatwoot_url="${chatwoot_url:-https://127.0.0.1:$chatwoot_port}"
+  fi
 
   printf '\n即将对外开放：\n'
   printf '  闲鱼管理平台：%s:%s -> %s\n' "$bind_ip" "$xianyu_port" "$xianyu_url"
@@ -212,6 +228,7 @@ configure_deployment() {
   {
     printf '# 此文件由“开始部署.sh”维护。升级版本包不会覆盖。\n'
     printf 'DEPLOY_ROOT=%s\n' "$DEPLOY_ROOT"
+    printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME"
     printf 'COMPOSE_PROFILES=%s\n' "$enable_chatwoot"
     printf 'XIANYU_BIND_IP=%s\n' "$bind_ip"
     printf 'XIANYU_HTTPS_PORT=%s\n' "$xianyu_port"
@@ -261,82 +278,136 @@ verify_outer_checksum() {
   ) || fail "版本包 SHA-256 校验失败"
 }
 
-validate_archive_paths() {
-  local package="$1" entry details
-  while IFS= read -r entry; do
-    case "$entry" in
-      /*|../*|*/../*|*/..) fail "版本包包含不安全路径：$entry" ;;
-    esac
-  done < <(tar -tzf "$package")
-  while IFS= read -r details; do
-    case "$details" in
-      l*|h*) fail "版本包不允许包含链接：$details" ;;
-    esac
-  done < <(tar -tvzf "$package")
-}
-
-load_release_environment() {
-  local file="$1" invalid
-  invalid="$(grep -Ev '^(PACKAGE_FORMAT|RELEASE_VERSION|RELEASE_ARCH|XIANYU_IMAGE|MYSQL_IMAGE|REDIS_IMAGE|CHATWOOT_IMAGE|CHATWOOT_POSTGRES_IMAGE|CHATWOOT_REDIS_IMAGE)=[A-Za-z0-9_./:@+-]+$|^#|^$' "$file" || true)"
-  [ -z "$invalid" ] || fail "版本清单包含不支持的内容"
-  # shellcheck disable=SC1090
-  source "$file"
-  [ "${PACKAGE_FORMAT:-}" = "1" ] || fail "不支持的版本包格式"
-  [ "${RELEASE_ARCH:-}" = "linux-amd64" ] || fail "版本包架构不是 linux-amd64"
-  [[ "${RELEASE_VERSION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || fail "版本号无效"
-  local name
-  for name in XIANYU_IMAGE MYSQL_IMAGE REDIS_IMAGE CHATWOOT_IMAGE CHATWOOT_POSTGRES_IMAGE CHATWOOT_REDIS_IMAGE; do
-    [ -n "${!name:-}" ] || fail "版本清单缺少 $name"
-  done
-}
-
 import_package() {
-  local package="$1" activate="${2:-true}" temporary archive release_dir
+  local package="$1" activate="${2:-true}" filename version source_image target_image
+  local release_dir architecture
   verify_outer_checksum "$package"
-  validate_archive_paths "$package"
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/xianyu-release.XXXXXX")"
-  trap 'rm -rf -- "$temporary"' RETURN
-  tar -xzf "$package" --no-same-owner --no-same-permissions -C "$temporary"
-  [ -f "$temporary/release.env" ] || fail "版本包缺少 release.env"
-  [ -f "$temporary/compose.all.yml" ] || fail "版本包缺少 compose.all.yml"
-  [ -f "$temporary/manifest.json" ] || fail "版本包缺少 manifest.json"
-  [ -f "$temporary/SHA256SUMS" ] || fail "版本包缺少 SHA256SUMS"
-  (
-    cd "$temporary"
-    sha256sum -c SHA256SUMS
-  ) || fail "版本包内部文件校验失败"
-  load_release_environment "$temporary/release.env"
+  filename="$(basename -- "$package")"
+  version="${filename#xianyu-admin-}"
+  version="${version%-linux-amd64.docker.tar.gz}"
+  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || fail "无法从文件名识别项目版本"
+  source_image="xianyu/xianyu-admin:$version"
+  target_image="xianyu-local/admin:$version"
 
-  info "正在导入 $RELEASE_VERSION 的离线镜像（不会访问镜像仓库）"
-  shopt -s nullglob
-  local archives=("$temporary"/images/*.docker.tar.gz)
-  shopt -u nullglob
-  [ "${#archives[@]}" -eq 5 ] || fail "版本包应包含 5 个唯一镜像归档，实际为 ${#archives[@]} 个"
-  for archive in "${archives[@]}"; do
-    info "导入 $(basename -- "$archive")"
-    gzip -dc -- "$archive" | docker load >/dev/null
-  done
-  local image
-  for image in "$XIANYU_IMAGE" "$MYSQL_IMAGE" "$REDIS_IMAGE" "$CHATWOOT_IMAGE" "$CHATWOOT_POSTGRES_IMAGE" "$CHATWOOT_REDIS_IMAGE"; do
-    docker image inspect "$image" >/dev/null 2>&1 || fail "镜像导入后不可用：$image"
-  done
+  info "正在导入闲鱼管理平台镜像 $version"
+  gzip -dc -- "$package" | docker load
+  docker image inspect "$source_image" >/dev/null 2>&1 ||
+    fail "镜像包未包含预期标签：$source_image"
+  architecture="$(docker image inspect --format '{{.Architecture}}' "$source_image")"
+  [ "$architecture" = amd64 ] || fail "项目镜像架构不是 linux/amd64：$architecture"
+  docker tag "$source_image" "$target_image"
 
   ensure_layout
-  release_dir="$DEPLOY_ROOT/releases/$RELEASE_VERSION"
+  release_dir="$DEPLOY_ROOT/releases/$version"
   mkdir -p "$release_dir"
-  install -m 644 "$temporary/compose.all.yml" "$release_dir/compose.all.yml"
-  install -m 600 "$temporary/release.env" "$release_dir/release.env"
-  install -m 644 "$temporary/manifest.json" "$release_dir/manifest.json"
+  {
+    printf 'RELEASE_VERSION=%s\n' "$version"
+    printf 'XIANYU_IMAGE=%s\n' "$target_image"
+  } > "$release_dir/release.env.tmp.$$"
+  chmod 600 "$release_dir/release.env.tmp.$$"
+  mv -f "$release_dir/release.env.tmp.$$" "$release_dir/release.env"
   if [ "$activate" = true ]; then
-    install -m 600 "$temporary/release.env" "$DEPLOY_ROOT/state/current-release.env"
+    install -m 600 "$release_dir/release.env" "$DEPLOY_ROOT/state/current-release.env"
   fi
-  rm -rf -- "$temporary"
-  trap - RETURN
   if [ "$activate" = true ]; then
-    success "版本 $RELEASE_VERSION 已导入并设为当前版本"
+    success "版本 $version 已导入并设为当前版本"
   else
-    success "版本 $RELEASE_VERSION 已导入，当前运行版本未切换"
+    success "版本 $version 已导入，当前运行版本未切换"
   fi
+}
+
+select_dependency_archive() {
+  local label="$1" hint="$2" files=() file choice index
+  declare -A seen=()
+  shopt -s nullglob nocaseglob
+  for file in \
+    "$SCRIPT_DIR"/*"$hint"*.docker.tar.gz \
+    "$SCRIPT_DIR"/*"$hint"*.tar.gz \
+    "$SCRIPT_DIR"/*"$hint"*.docker.tar \
+    "$SCRIPT_DIR"/*"$hint"*.tar
+  do
+    if [ -f "$file" ] && [ -z "${seen[$file]:-}" ]; then
+      files+=("$file")
+      seen[$file]=1
+    fi
+  done
+  shopt -u nullglob nocaseglob
+  printf '\n%s 本地镜像包：\n' "$label" >&2
+  for index in "${!files[@]}"; do
+    printf '  %d) %s\n' "$((index + 1))" "$(basename -- "${files[$index]}")" >&2
+  done
+  printf '  0) 手动输入文件路径\n' >&2
+  read -r -p '请选择: ' choice
+  if [ "${choice:-0}" = 0 ]; then
+    read -r -p "$label 镜像包路径: " file
+    [ -f "$file" ] || fail "文件不存在：$file"
+    printf '%s\n' "$file"
+    return 0
+  fi
+  validate_port "$choice" || fail "选择无效"
+  [ "$choice" -le "${#files[@]}" ] || fail "选择无效"
+  printf '%s\n' "${files[$((choice - 1))]}"
+}
+
+load_docker_archive() {
+  local archive="$1"
+  info "正在导入 $(basename -- "$archive")"
+  case "$archive" in
+    *.gz|*.tgz) gzip -dc -- "$archive" | docker load ;;
+    *) docker load --input "$archive" ;;
+  esac
+}
+
+prepare_official_image() {
+  local mode="$1" label="$2" hint="$3" source_image="$4" target_image="$5" archive
+  if [ "$mode" = online ]; then
+    info "正在拉取 $label：$source_image"
+    docker pull "$source_image"
+  else
+    archive="$(select_dependency_archive "$label" "$hint")"
+    load_docker_archive "$archive"
+  fi
+  docker image inspect "$source_image" >/dev/null 2>&1 ||
+    fail "$label 镜像包未包含预期官方标签：$source_image"
+  [ "$(docker image inspect --format '{{.Architecture}}' "$source_image")" = amd64 ] ||
+    fail "$label 镜像不是 linux/amd64"
+  docker tag "$source_image" "$target_image"
+  success "$label 已准备：$target_image"
+}
+
+prepare_dependency_images() {
+  local mode="${1:-}" choice enabled target="$DEPLOY_ROOT/config/images.env"
+  if [ -z "$mode" ]; then
+    printf '\n官方依赖镜像来源：\n'
+    printf '  1) 在线拉取官方镜像\n'
+    printf '  2) 导入本地官方镜像包\n'
+    read -r -p '请选择 [1]: ' choice
+    case "${choice:-1}" in
+      1) mode=online ;;
+      2) mode=offline ;;
+      *) fail "依赖镜像来源选择无效" ;;
+    esac
+  fi
+
+  prepare_official_image "$mode" MySQL mysql mysql:8.4 xianyu-local/mysql:8.4
+  prepare_official_image "$mode" Redis redis redis:7.4-alpine xianyu-local/redis:7.4-alpine
+  enabled="$(read_config_value COMPOSE_PROFILES || true)"
+  if [ "$enabled" = chatwoot ]; then
+    prepare_official_image "$mode" Chatwoot chatwoot chatwoot/chatwoot:v4.16.0 xianyu-local/chatwoot:4.16.0
+    prepare_official_image "$mode" pgvector pgvector pgvector/pgvector:pg16 xianyu-local/pgvector:pg16
+  fi
+
+  umask 077
+  {
+    printf '# 官方镜像由“开始部署.sh”拉取或导入后统一标记。\n'
+    printf 'MYSQL_IMAGE=xianyu-local/mysql:8.4\n'
+    printf 'REDIS_IMAGE=xianyu-local/redis:7.4-alpine\n'
+    printf 'CHATWOOT_IMAGE=xianyu-local/chatwoot:4.16.0\n'
+    printf 'CHATWOOT_POSTGRES_IMAGE=xianyu-local/pgvector:pg16\n'
+    printf 'CHATWOOT_REDIS_IMAGE=xianyu-local/redis:7.4-alpine\n'
+  } > "$target.tmp.$$"
+  chmod 600 "$target.tmp.$$"
+  mv -f "$target.tmp.$$" "$target"
 }
 
 current_version() {
@@ -346,18 +417,52 @@ current_version() {
 }
 
 compose() {
-  local version release_file compose_file
+  local version release_file images_file profile
+  local -a compose_args
   version="$(current_version)"
   [ -n "$version" ] || fail "尚未安装版本包"
   release_file="$DEPLOY_ROOT/state/current-release.env"
-  compose_file="$DEPLOY_ROOT/releases/$version/compose.all.yml"
+  images_file="$DEPLOY_ROOT/config/images.env"
   [ -f "$DEPLOY_ROOT/config/deployment.env" ] || fail "尚未完成部署配置"
-  [ -f "$compose_file" ] || fail "当前版本的 Compose 文件不存在"
-  docker compose \
-    --project-name xianyu \
-    --env-file "$DEPLOY_ROOT/config/deployment.env" \
-    --env-file "$release_file" \
-    -f "$compose_file" "$@"
+  [ -f "$images_file" ] || fail "尚未准备官方依赖镜像"
+  [ -f "$COMPOSE_FILE" ] || fail "Compose 文件不存在：$COMPOSE_FILE"
+  compose_args=(
+    --project-name "$COMPOSE_PROJECT_NAME"
+    --env-file "$DEPLOY_ROOT/config/deployment.env"
+    --env-file "$release_file"
+    --env-file "$images_file"
+    -f "$COMPOSE_FILE"
+  )
+  profile="$(read_config_value COMPOSE_PROFILES || true)"
+  if [ "$profile" = chatwoot ]; then
+    compose_args+=(--profile chatwoot)
+  fi
+  docker compose "${compose_args[@]}" "$@"
+}
+
+verify_runtime_images() {
+  local release_file="$DEPLOY_ROOT/state/current-release.env"
+  local images_file="$DEPLOY_ROOT/config/images.env"
+  local profile name reference
+  local -a names=(XIANYU_IMAGE MYSQL_IMAGE REDIS_IMAGE)
+
+  [ -f "$release_file" ] || fail "尚未安装版本包"
+  [ -f "$images_file" ] || fail "尚未准备官方依赖镜像"
+  profile="$(read_config_value COMPOSE_PROFILES || true)"
+  if [ "$profile" = chatwoot ]; then
+    names+=(CHATWOOT_IMAGE CHATWOOT_POSTGRES_IMAGE CHATWOOT_REDIS_IMAGE)
+  fi
+
+  for name in "${names[@]}"; do
+    if [ "$name" = XIANYU_IMAGE ]; then
+      reference="$(sed -n "s/^${name}=//p" "$release_file" | tail -n 1)"
+    else
+      reference="$(sed -n "s/^${name}=//p" "$images_file" | tail -n 1)"
+    fi
+    [ -n "$reference" ] || fail "镜像配置缺少 $name"
+    docker image inspect "$reference" >/dev/null 2>&1 ||
+      fail "本地镜像不可用：$reference；请先导入版本包或运行“官方依赖镜像管理”"
+  done
 }
 
 refresh_combined_ca() {
@@ -638,14 +743,19 @@ certificate_management() {
   esac
   if [ -n "$(current_version)" ] && compose ps --status running -q 2>/dev/null | grep -q .; then
     if confirm "证书已更新，是否立即重启 HTTPS 网关？"; then
-      compose restart gateway chatwoot-gateway || true
+      compose restart gateway
+      if [ "$(read_config_value COMPOSE_PROFILES || true)" = chatwoot ]; then
+        compose restart chatwoot-gateway
+      fi
     fi
   fi
 }
 
 start_stack() {
   certificate_ready || fail "证书配置不完整，请先进入“证书管理”"
-  info "正在启动当前版本，Compose 不会拉取任何镜像"
+  ensure_chatwoot_secrets
+  verify_runtime_images
+  info "正在启动当前版本；Compose 只使用脚本已准备好的本地镜像"
   compose up -d --wait --remove-orphans
   success "服务已启动"
   printf '闲鱼管理平台：%s\n' "$(read_config_value XIANYU_PUBLIC_BASE_URL)"
@@ -655,7 +765,7 @@ start_stack() {
 }
 
 stop_stack() {
-  compose stop
+  compose --profile chatwoot stop
   success "服务已停止，数据和配置均已保留"
 }
 
@@ -669,6 +779,8 @@ upgrade_stack() {
   import_package "$package" true
   after="$(current_version)"
   if [ -f "$DEPLOY_ROOT/config/deployment.env" ] && certificate_ready; then
+    ensure_chatwoot_secrets
+    verify_runtime_images
     compose up -d --wait --remove-orphans
     success "已从 ${before:-未安装} 升级到 $after"
   else
@@ -684,21 +796,32 @@ import_only() {
 }
 
 first_deployment() {
-  local root package
+  local package
   [ -z "$(current_version)" ] || fail "已经存在部署，请使用“安装/升级版本包”"
-  printf '\n首次部署会创建本地数据目录、导入同级版本包并启动完整堆栈。\n'
-  printf '脚本不会访问外部镜像仓库，也不会覆盖其他 Docker 项目。\n\n'
-  root="$(prompt_value '部署数据根目录' "$DEFAULT_DEPLOY_ROOT")"
-  printf '部署目录：%s\n' "$root"
+  printf '\n首次部署会在脚本同级创建 XIANYU_DATA，导入本项目镜像并启动服务。\n'
+  printf '官方依赖镜像可选择在线拉取或从本地官方镜像包导入。\n'
+  printf 'Compose 项目和容器统一使用固定的 xianyu 名称。\n\n'
+  printf '数据目录：%s\n' "$DEPLOY_ROOT"
   confirm "确认开始首次部署？" || return 0
-  set_deployment_root "$root"
   ensure_layout
   package="$(select_package)"
   import_package "$package" true
-  configure_deployment false
+  configure_deployment
+  prepare_dependency_images
   ensure_chatwoot_secrets
   initial_certificate_setup
   start_stack
+}
+
+dependency_image_management() {
+  [ -f "$DEPLOY_ROOT/config/deployment.env" ] || fail "请先完成首次部署配置"
+  prepare_dependency_images
+  if [ -n "$(current_version)" ] && compose ps --status running -q 2>/dev/null | grep -q .; then
+    if confirm "依赖镜像已更新，是否立即重建相关容器？"; then
+      compose up -d --wait --remove-orphans
+      success "官方依赖容器已更新"
+    fi
+  fi
 }
 
 show_status() {
@@ -713,8 +836,8 @@ show_help() {
   cat <<'EOF'
 用法：./开始部署.sh
 
-将本脚本与 xianyu-<版本>-linux-amd64.tar.gz 及其 .sha256 放在同一目录后执行。
-版本包同时用于首次部署和升级；脚本不会连接镜像仓库拉取镜像。
+将本脚本、compose.all.yml、本项目 Docker 镜像压缩包及其 .sha256 放在同一目录后执行。
+数据固定保存在同级 XIANYU_DATA。官方依赖镜像支持在线拉取或本地归档导入。
 
 可选参数：
   --help    显示帮助
@@ -729,7 +852,7 @@ self_check() {
     [ -n "$package" ] || continue
     count=$((count + 1))
     case "$(basename -- "$package")" in
-      xianyu-[A-Za-z0-9]*-linux-amd64.tar.gz) ;;
+      xianyu-admin-[A-Za-z0-9]*-linux-amd64.docker.tar.gz) ;;
       *) fail "版本包命名不正确：$package" ;;
     esac
   done < <(list_packages)
@@ -739,10 +862,9 @@ self_check() {
 main_menu() {
   local choice
   while true; do
-    load_deployment_root
     printf '\n========================================\n'
-    printf ' 闲鱼管理平台 · Docker 离线部署\n'
-    printf ' 部署目录：%s\n' "$DEPLOY_ROOT"
+    printf ' 闲鱼管理平台 · Docker 部署\n'
+    printf ' 数据目录：%s\n' "$DEPLOY_ROOT"
     printf ' 当前版本：%s\n' "$(current_version || true)"
     printf '========================================\n'
     printf '  1) 首次部署\n'
@@ -755,6 +877,7 @@ main_menu() {
     printf '  8) 只导入版本包\n'
     printf '  9) 修改端口和 URL 配置\n'
     printf ' 10) 证书管理\n'
+    printf ' 11) 官方依赖镜像管理\n'
     printf '  0) 退出\n'
     read -r -p '请选择: ' choice
     case "$choice" in
@@ -766,8 +889,9 @@ main_menu() {
       6) compose logs -f --tail=200 ;;
       7) ensure_layout; upgrade_stack ;;
       8) ensure_layout; import_only ;;
-      9) ensure_layout; configure_deployment true ;;
+      9) ensure_layout; configure_deployment ;;
       10) certificate_management ;;
+      11) ensure_layout; dependency_image_management ;;
       0) exit 0 ;;
       *) warn "选择无效" ;;
     esac
@@ -783,5 +907,4 @@ case "${1:-}" in
 esac
 
 ensure_dependencies
-load_deployment_root
 main_menu

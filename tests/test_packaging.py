@@ -26,9 +26,9 @@ class PackagingContractTests(unittest.TestCase):
         self.assertNotIn(".gitlab/ci/binary.yml", pipeline)
         self.assertFalse((root / ".gitlab" / "ci" / "binary.yml").exists())
         self.assertIn("image-amd64:", docker_jobs)
-        self.assertIn("chatwoot-source-amd64:", docker_jobs)
-        self.assertIn("chatwoot-image-amd64:", docker_jobs)
         self.assertIn("archive-amd64:", docker_jobs)
+        self.assertNotIn("chatwoot-source-amd64:", docker_jobs)
+        self.assertNotIn("chatwoot-image-amd64:", docker_jobs)
         self.assertIn(".container-delivery:", common_jobs)
         self.assertIn('$CI_COMMIT_BRANCH == "tg"', common_jobs)
         self.assertNotIn('$CI_COMMIT_BRANCH == "main"', common_jobs)
@@ -45,21 +45,18 @@ class PackagingContractTests(unittest.TestCase):
             '--output "type=image,\\"name=$names\\",push=true"',
             docker_jobs,
         )
-        self.assertIn("BundleImage.Dockerfile", docker_jobs)
-        self.assertIn("assemble_offline_bundle.sh", docker_jobs)
-        self.assertIn("pgvector/pgvector:pg16", docker_jobs)
-        self.assertIn("chatwoot:4.16.0-xianyu", docker_jobs)
-        self.assertNotIn("rm -rf .chatwoot/.git", docker_jobs)
-        self.assertGreaterEqual(
-            docker_jobs.count("--opt platform=linux/amd64"), 3
-        )
+        self.assertNotIn("BundleImage.Dockerfile", docker_jobs)
+        self.assertNotIn("assemble_offline_bundle.sh", docker_jobs)
+        self.assertNotIn("chatwoot", docker_jobs.lower())
+        self.assertEqual(docker_jobs.count("--opt platform=linux/amd64"), 2)
         self.assertIn("gzip -9", docker_jobs)
         self.assertIn("expire_in: 14 days", docker_jobs)
         self.assertIn(
-            "artifacts/xianyu-*-linux-amd64.tar.gz",
+            "xianyu-admin-*-linux-amd64.docker.tar.gz",
             docker_jobs,
         )
-        self.assertIn("artifacts/开始部署.sh", docker_jobs)
+        self.assertIn("- 开始部署.sh", docker_jobs)
+        self.assertIn("- compose.all.yml", docker_jobs)
 
     def test_container_geoip_resources_are_complete(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -140,10 +137,16 @@ class PackagingContractTests(unittest.TestCase):
         self.assertNotIn("pull_policy: always", compose_all)
         self.assertEqual(compose_all.count("pull_policy: never"), 10)
         self.assertIn("${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}", compose_all)
-        self.assertIn("data/xianyu/contact-avatars", compose_all)
-        self.assertIn("data/chatwoot/postgres", compose_all)
+        self.assertIn("/contact-avatars:/data/contact-avatars", compose_all)
+        self.assertIn("/chatwoot/postgres:/var/lib/postgresql/data", compose_all)
         self.assertIn("certificates/xianyu", compose_all)
         self.assertIn("certificates/chatwoot", compose_all)
+        self.assertIn("container_name: xianyu-api", compose_all)
+        self.assertIn("container_name: xianyu-worker", compose_all)
+        self.assertIn("container_name: xianyu-chatwoot", compose_all)
+        self.assertIn("name: xianyu_frontend", compose_all)
+        self.assertIn("name: xianyu_backend", compose_all)
+        self.assertIn("name: xianyu_chatwoot", compose_all)
         self.assertIn("\n  chatwoot-rails:", compose_all)
         self.assertIn("\n  chatwoot-sidekiq:", compose_all)
         self.assertIn("\n  chatwoot-gateway:", compose_all)
@@ -155,6 +158,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("\n  redis:", compose_all)
         self.assertIn("MYSQL_PASSWORD_FILE:", compose_all)
         self.assertIn("MYSQL_ROOT_PASSWORD_FILE:", compose_all)
+        self.assertNotIn("REDIS_URL: redis://chatwoot-redis:6379", compose_all)
         self.assertIn(
             "jwt-secret,mysql-root-password,mysql-password,redis-password",
             compose_all,
@@ -168,26 +172,31 @@ class PackagingContractTests(unittest.TestCase):
             ["XIANYU_DATABASE_URL", "XIANYU_REDIS_URL"],
         )
 
-    def test_offline_deployment_is_single_package_and_never_pulls(self) -> None:
+    def test_deployment_imports_project_and_prepares_official_dependencies(self) -> None:
         root = Path(__file__).resolve().parents[1]
         deploy = (root / "开始部署.sh").read_text(encoding="utf-8")
-        assembler = (
-            root / "tools" / "package" / "assemble_offline_bundle.sh"
-        ).read_text(encoding="utf-8")
 
-        self.assertIn("xianyu-*-linux-amd64.tar.gz", deploy)
+        self.assertIn("xianyu-admin-*-linux-amd64.docker.tar.gz", deploy)
+        self.assertIn('DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"', deploy)
         self.assertIn("docker load", deploy)
-        self.assertNotIn("docker pull", deploy)
+        self.assertIn("docker pull", deploy)
+        self.assertIn("在线拉取官方镜像", deploy)
+        self.assertIn("导入本地官方镜像包", deploy)
+        self.assertIn("chatwoot/chatwoot:v4.16.0", deploy)
+        self.assertIn("mysql:8.4", deploy)
+        self.assertIn("redis:7.4-alpine", deploy)
+        self.assertIn("pgvector/pgvector:pg16", deploy)
+        self.assertIn("REDIS_URL=redis://:%s@chatwoot-redis:6379", deploy)
         self.assertIn("证书管理", deploy)
         self.assertIn("99991231235959Z", deploy)
         self.assertIn("CHATWOOT_HTTPS_PORT", deploy)
         self.assertIn("现有数据、配置、证书和密钥不会被修改", deploy)
-        self.assertIn(
-            'archive="$output_dir/xianyu-$release_version-linux-amd64.tar.gz"',
-            assembler,
+        self.assertFalse(
+            (root / "tools" / "package" / "assemble_offline_bundle.sh").exists()
         )
-        self.assertIn("CHATWOOT_POSTGRES_IMAGE", assembler)
-        self.assertIn("SHA256SUMS", assembler)
+        self.assertFalse(
+            (root / "tools" / "package" / "BundleImage.Dockerfile").exists()
+        )
 
     def test_gateway_limits_browser_archives_without_widening_general_api(
         self,

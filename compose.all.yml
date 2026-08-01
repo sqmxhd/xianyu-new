@@ -1,7 +1,7 @@
 name: xianyu
 
-# 离线 ALL 堆栈。所有镜像名由版本包的 state/current-release.env 注入，
-# 所有数据、配置和证书都通过 DEPLOY_ROOT 绑定到宿主机；禁止自动拉取镜像。
+# ALL 堆栈。项目镜像由 state/current-release.env 注入，官方依赖镜像由
+# config/images.env 注入。开始部署.sh 会先拉取或导入全部镜像，Compose 本身不拉取。
 
 x-xianyu-environment: &xianyu-environment
   XIANYU_RUNTIME_SECRET_DIR: /run/xianyu-secrets
@@ -42,12 +42,12 @@ x-xianyu-environment: &xianyu-environment
   XIANYU_FINGERPRINT_BROWSER_MAX_EXTRACTED_BYTES: "1073741824"
 
 x-xianyu-volumes: &xianyu-volumes
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/product-images:/data/product-images"
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/contact-avatars:/data/contact-avatars"
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/notification-sounds:/data/web-notification-sounds"
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/browser-profiles:/data/browser-profiles"
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/fingerprint-chromium:/data/fingerprint-chromium"
-  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/standard-chromium:/data/standard-chromium"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/product-images:/data/product-images"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/contact-avatars:/data/contact-avatars"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/notification-sounds:/data/web-notification-sounds"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/browser-profiles:/data/browser-profiles"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/fingerprint-chromium:/data/fingerprint-chromium"
+  - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/standard-chromium:/data/standard-chromium"
   - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
   - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/trust:/etc/xianyu/ca:ro"
 
@@ -63,16 +63,16 @@ x-chatwoot-environment: &chatwoot-environment
   RAILS_LOG_TO_STDOUT: "true"
   RAILS_MAX_THREADS: "5"
   ENABLE_PUSH_RELAY_SERVER: "true"
+  SAFE_FETCH_ALLOW_PRIVATE_NETWORK: "true"
   POSTGRES_HOST: chatwoot-postgres
   POSTGRES_PORT: "5432"
   POSTGRES_DATABASE: chatwoot
   POSTGRES_USERNAME: postgres
-  REDIS_URL: redis://chatwoot-redis:6379
   SSL_CERT_FILE: /etc/ssl/certs/xianyu-combined-ca.pem
   NODE_EXTRA_CA_CERTS: /etc/ssl/certs/xianyu-combined-ca.pem
 
 x-chatwoot-service: &chatwoot-service
-  image: "${CHATWOOT_IMAGE:?版本包缺少 CHATWOOT_IMAGE}"
+  image: "${CHATWOOT_IMAGE:?请先运行开始部署.sh准备 Chatwoot 官方镜像}"
   pull_policy: never
   platform: linux/amd64
   restart: unless-stopped
@@ -81,7 +81,7 @@ x-chatwoot-service: &chatwoot-service
   environment:
     <<: *chatwoot-environment
   volumes:
-    - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/storage:/app/storage"
+    - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/chatwoot/storage:/app/storage"
     - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/certificates/trust/combined-ca.pem:/etc/ssl/certs/xianyu-combined-ca.pem:ro"
   networks:
     - chatwoot
@@ -99,6 +99,7 @@ x-default-logging: &default-logging
 
 services:
   init-config:
+    container_name: xianyu-init-config
     image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
     pull_policy: never
     platform: linux/amd64
@@ -111,12 +112,13 @@ services:
       XIANYU_SECRET_GUARD_DIRS: /var/lib/mysql,/data/redis
     volumes:
       - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets"
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/mysql:/var/lib/mysql:ro"
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/redis:/data/redis:ro"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/mysql:/var/lib/mysql:ro"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/redis:/data/redis:ro"
     logging: *default-logging
 
   mysql:
-    image: "${MYSQL_IMAGE:?版本包缺少 MYSQL_IMAGE}"
+    container_name: xianyu-mysql
+    image: "${MYSQL_IMAGE:?请先运行开始部署.sh准备 MySQL 官方镜像}"
     pull_policy: never
     platform: linux/amd64
     restart: unless-stopped
@@ -126,7 +128,7 @@ services:
       MYSQL_PASSWORD_FILE: /run/xianyu-secrets/mysql-password
       MYSQL_ROOT_PASSWORD_FILE: /run/xianyu-secrets/mysql-root-password
     volumes:
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/mysql:/var/lib/mysql"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/mysql:/var/lib/mysql"
       - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
     networks: [xianyu-backend]
     logging: *default-logging
@@ -141,13 +143,14 @@ services:
       start_period: 30s
 
   redis:
-    image: "${REDIS_IMAGE:?版本包缺少 REDIS_IMAGE}"
+    container_name: xianyu-redis
+    image: "${REDIS_IMAGE:?请先运行开始部署.sh准备 Redis 官方镜像}"
     pull_policy: never
     platform: linux/amd64
     restart: unless-stopped
     command: [/bin/sh, -c, 'exec redis-server --appendonly yes --requirepass "$$(cat /run/xianyu-secrets/redis-password)"']
     volumes:
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/xianyu/redis:/data"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/redis:/data"
       - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/xianyu:/run/xianyu-secrets:ro"
     networks: [xianyu-backend]
     logging: *default-logging
@@ -162,6 +165,7 @@ services:
       start_period: 10s
 
   api:
+    container_name: xianyu-api
     image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
     pull_policy: never
     platform: linux/amd64
@@ -187,6 +191,7 @@ services:
       start_period: 30s
 
   worker:
+    container_name: xianyu-worker
     image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
     pull_policy: never
     platform: linux/amd64
@@ -209,6 +214,7 @@ services:
       start_period: 20s
 
   gateway:
+    container_name: xianyu-gateway
     image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
     pull_policy: never
     platform: linux/amd64
@@ -232,7 +238,8 @@ services:
       start_period: 10s
 
   chatwoot-postgres:
-    image: "${CHATWOOT_POSTGRES_IMAGE:?版本包缺少 CHATWOOT_POSTGRES_IMAGE}"
+    container_name: xianyu-chatwoot-postgres
+    image: "${CHATWOOT_POSTGRES_IMAGE:?请先运行开始部署.sh准备 pgvector 官方镜像}"
     pull_policy: never
     platform: linux/amd64
     profiles: [chatwoot]
@@ -243,7 +250,7 @@ services:
       POSTGRES_DB: chatwoot
       POSTGRES_USER: postgres
     volumes:
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/postgres:/var/lib/postgresql/data"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/chatwoot/postgres:/var/lib/postgresql/data"
     networks: [chatwoot]
     logging: *default-logging
     healthcheck:
@@ -254,7 +261,8 @@ services:
       start_period: 20s
 
   chatwoot-redis:
-    image: "${CHATWOOT_REDIS_IMAGE:?版本包缺少 CHATWOOT_REDIS_IMAGE}"
+    container_name: xianyu-chatwoot-redis
+    image: "${CHATWOOT_REDIS_IMAGE:?请先运行开始部署.sh准备 Redis 官方镜像}"
     pull_policy: never
     platform: linux/amd64
     profiles: [chatwoot]
@@ -263,7 +271,7 @@ services:
       - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/secrets/chatwoot.env"
     command: [/bin/sh, -c, 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
     volumes:
-      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/data/chatwoot/redis:/data"
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT 未配置}/chatwoot/redis:/data"
     networks: [chatwoot]
     logging: *default-logging
     healthcheck:
@@ -274,6 +282,7 @@ services:
       start_period: 10s
 
   chatwoot-prepare:
+    container_name: xianyu-chatwoot-prepare
     <<: *chatwoot-service
     profiles: [chatwoot]
     restart: "no"
@@ -281,6 +290,7 @@ services:
     command: [bundle, exec, rails, db:chatwoot_prepare]
 
   chatwoot-rails:
+    container_name: xianyu-chatwoot
     <<: *chatwoot-service
     profiles: [chatwoot]
     entrypoint: docker/entrypoints/rails.sh
@@ -296,6 +306,7 @@ services:
       start_period: 45s
 
   chatwoot-sidekiq:
+    container_name: xianyu-chatwoot-worker
     <<: *chatwoot-service
     profiles: [chatwoot]
     command: [bundle, exec, sidekiq, -C, config/sidekiq.yml]
@@ -304,6 +315,7 @@ services:
         condition: service_completed_successfully
 
   chatwoot-gateway:
+    container_name: xianyu-chatwoot-gateway
     image: "${XIANYU_IMAGE:?版本包缺少 XIANYU_IMAGE}"
     pull_policy: never
     platform: linux/amd64
@@ -328,5 +340,8 @@ services:
 
 networks:
   xianyu-frontend:
+    name: xianyu_frontend
   xianyu-backend:
+    name: xianyu_backend
   chatwoot:
+    name: xianyu_chatwoot

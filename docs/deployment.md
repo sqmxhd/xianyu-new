@@ -1,8 +1,8 @@
 # Deployment
 
-正式 Docker 离线部署请直接使用 [`packaging.md`](packaging.md) 中的完整版本包和
-`开始部署.sh`。本页其余内容用于源码安装、开发工作区和 systemd 方式，不是离线
-Docker ALL 堆栈的操作步骤。
+正式 Docker 一键部署请直接使用 [`packaging.md`](packaging.md) 中的本项目镜像包、
+`compose.all.yml` 和 `开始部署.sh`。本页其余内容用于源码安装、开发工作区和
+systemd 方式，不是 Docker ALL 堆栈的操作步骤。
 
 ## Layout
 

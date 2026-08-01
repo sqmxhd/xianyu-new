@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | `.env.local` | 源码启动的私有配置 | 外部 MySQL、Redis 地址 |
 | `.env.docker` | Docker 项目容器模式的私有配置 | 外部 MySQL、Redis 地址 |
-| `xianyu-deployment/config/deployment.env` | 离线 ALL 部署参数 | 由 `开始部署.sh` 生成 |
+| `XIANYU_DATA/config/deployment.env` | Docker ALL 部署参数 | 由 `开始部署.sh` 生成 |
 
 `.env.local` 和 `.env.docker` 都不能提交到 Git。不要另外创建含义不明确的
 `.env`。`third_party/XianYuApis/.env.dev` 属于上游代码，不是项目部署配置。
@@ -40,21 +40,21 @@ ALL 模式不再要求复制 ENV 模板。`开始部署.sh` 询问监听 IP、�
 | --- | --- |
 | `XIANYU_API_HEALTH_URL` | 源码使用本机 API；Docker 固定为 `api:8000` |
 | `XIANYU_INTERNAL_API_URL` | 源码使用本机 API；Docker 固定为 `api:8000` |
-| `COMPOSE_PROFILES` | 离线脚本根据是否启用内置 Chatwoot 自动写入 |
+| `COMPOSE_PROFILES` | 部署脚本根据是否启用官方 Chatwoot 自动写入 |
 | `XIANYU_TLS_DIR` | Docker 固定绑定部署目录的 `certificates/xianyu` |
 | `XIANYU_INTERNAL_CA_FILE` | Docker 固定绑定部署目录的 `certificates/trust` |
 | `XIANYU_DATABASE_HOST/USER/NAME` | ALL 模式使用固定容器服务名和内部账号 |
 | `XIANYU_REDIS_HOST` | ALL 模式固定使用 `redis` 服务名 |
 
 Docker 项目模式和 ALL 模式使用相同 Compose 项目名，因此不能在同一主机上把它们
-作为两套同名实例同时运行。离线 ALL 模式使用宿主机 bind mount，不依赖匿名或命名
+作为两套同名实例同时运行。ALL 模式使用宿主机 `XIANYU_DATA` bind mount，不依赖匿名或命名
 卷。
 
 ## 次配置
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `XIANYU_IMAGE` | 版本包清单 | 由当前离线版本包写入，不允许人工改为远程 `latest` |
+| `XIANYU_IMAGE` | 当前项目版本 | 由本项目镜像包导入后写入，不允许人工改为远程 `latest` |
 | `XIANYU_BIND_IP` | `0.0.0.0` | HTTPS 网关宿主机监听地址 |
 | `XIANYU_HTTPS_PORT` | `6161` | HTTPS 网关宿主机端口 |
 | `XIANYU_CORS_ORIGINS` | 同源 | 独立前端跨域访问时设置 |

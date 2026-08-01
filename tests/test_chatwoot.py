@@ -1818,7 +1818,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             "buyer-local-audio：[语音 2秒]",
         )
 
-    async def test_local_recall_updates_original_chatwoot_message_state(self) -> None:
+    async def test_local_recall_creates_official_chatwoot_private_snapshot(self) -> None:
         await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
@@ -1869,10 +1869,16 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             message.message_pk,
         )
 
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._update_chatwoot_recall_state",
-            new=AsyncMock(return_value={}),
-        ) as update_recall_state:
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_recall_snapshot_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._create_private_recall_snapshot",
+                new=AsyncMock(return_value=True),
+            ) as create_snapshot,
+        ):
             result = await execute_local_message_task(
                 self.store,
                 account_id=self.account.account_id,
@@ -1880,12 +1886,15 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["action"], "recalled")
-        self.assertEqual(result["representation"], "original_message_state")
-        update_recall_state.assert_awaited_once_with(
+        self.assertEqual(result["representation"], "private_snapshot")
+        self.assertTrue(result["private_snapshot_created"])
+        create_snapshot.assert_awaited_once_with(
             ANY,
             chatwoot_conversation_id="388",
             chatwoot_message_id="399",
-            state="recalled",
+            contexts=[ANY],
+            succeeded=True,
+            error=None,
         )
 
     async def test_webhook_routes_to_the_account_owned_by_the_conversation(self) -> None:
@@ -2543,212 +2552,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             "299",
         )
         self.assertEqual(mappings[0]["state"], "remote_deleted")
-
-    async def test_recall_request_calls_platform_and_marks_original_message(self) -> None:
-        await self.repository.upsert_config(
-            ChatwootConfigUpdatePayload(
-                enabled=True,
-                base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
-                api_access_token="service-token",
-            )
-        )
-        await self.store.record_message(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall",
-            direction="inbound",
-            message_type="text",
-            content="hello",
-            peer_user_id="buyer-chatwoot-recall",
-        )
-        outbound = await self.store.record_message(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall",
-            direction="outbound",
-            message_type="text",
-            content="reply",
-            message_id="platform-chatwoot-recall",
-            peer_user_id="buyer-chatwoot-recall",
-            send_success=True,
-        )
-        assert outbound is not None
-        await self.repository.create_conversation_map(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall",
-            peer_user_id="buyer-chatwoot-recall",
-            source_id="source-chatwoot-recall",
-            chatwoot_conversation_id="488",
-        )
-        await self.repository.record_message_map(
-            account_id=self.account.account_id,
-            message_pk=outbound.message_pk,
-            chatwoot_message_id="499",
-            chatwoot_conversation_id="488",
-            origin="chatwoot",
-            state="synced",
-        )
-        webhook_payload = {
-            "event": "message_updated",
-            "id": 499,
-            "message_type": "outgoing",
-            "content_attributes": {
-                "xianyu_recall": {
-                    "state": "requested",
-                    "request_id": "request-499",
-                }
-            },
-            "conversation": {"id": 488},
-        }
-        raw = json.dumps(webhook_payload).encode()
-        await self.repository.record_webhook(
-            delivery_id="delivery-chatwoot-recall",
-            event_name="message_updated",
-            payload_sha256=hashlib.sha256(raw).hexdigest(),
-            raw_payload=raw,
-        )
-        runtime_command = AsyncMock(
-            return_value={
-                "success": True,
-                "message_pk": outbound.message_pk,
-            }
-        )
-
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._update_chatwoot_recall_state",
-            new=AsyncMock(return_value={}),
-        ) as update_recall_state:
-            result = await execute_webhook_task(
-                self.store,
-                delivery_id="delivery-chatwoot-recall",
-                runtime_command=runtime_command,
-            )
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["platform_recall"])
-        self.assertEqual(result["recalled_messages"], 1)
-        runtime_command.assert_awaited_once_with(
-            "recall",
-            self.account.account_id,
-            {
-                "conversation_id": "conversation-chatwoot-recall",
-                "message_pk": outbound.message_pk,
-            },
-        )
-        update_recall_state.assert_awaited_once_with(
-            ANY,
-            chatwoot_conversation_id="488",
-            chatwoot_message_id="499",
-            state="recalled",
-            error=None,
-        )
-        mappings = await self.repository.find_message_maps_by_remote(
-            self.account.account_id,
-            "499",
-        )
-        self.assertEqual(mappings[0]["state"], "recalled")
-
-    async def test_failed_recall_request_keeps_message_and_reports_failure(self) -> None:
-        await self.repository.upsert_config(
-            ChatwootConfigUpdatePayload(
-                enabled=True,
-                base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
-                api_access_token="service-token",
-            )
-        )
-        await self.store.record_message(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall-failed",
-            direction="inbound",
-            message_type="text",
-            content="hello",
-            peer_user_id="buyer-chatwoot-recall-failed",
-        )
-        outbound = await self.store.record_message(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall-failed",
-            direction="outbound",
-            message_type="text",
-            content="reply",
-            message_id="platform-chatwoot-recall-failed",
-            peer_user_id="buyer-chatwoot-recall-failed",
-            send_success=True,
-        )
-        assert outbound is not None
-        await self.repository.create_conversation_map(
-            account_id=self.account.account_id,
-            conversation_id="conversation-chatwoot-recall-failed",
-            peer_user_id="buyer-chatwoot-recall-failed",
-            source_id="source-chatwoot-recall-failed",
-            chatwoot_conversation_id="588",
-        )
-        await self.repository.record_message_map(
-            account_id=self.account.account_id,
-            message_pk=outbound.message_pk,
-            chatwoot_message_id="599",
-            chatwoot_conversation_id="588",
-            origin="chatwoot",
-            state="synced",
-        )
-        webhook_payload = {
-            "event": "message_updated",
-            "id": 599,
-            "message_type": "outgoing",
-            "content_attributes": {
-                "xianyu_recall": {
-                    "state": "requested",
-                    "request_id": "request-599",
-                }
-            },
-            "conversation": {"id": 588},
-        }
-        raw = json.dumps(webhook_payload).encode()
-        await self.repository.record_webhook(
-            delivery_id="delivery-chatwoot-recall-failed",
-            event_name="message_updated",
-            payload_sha256=hashlib.sha256(raw).hexdigest(),
-            raw_payload=raw,
-        )
-        runtime_command = AsyncMock(
-            return_value={
-                "success": False,
-                "error": "message is outside the two-minute recall window",
-            }
-        )
-
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._update_chatwoot_recall_state",
-            new=AsyncMock(return_value={}),
-        ) as update_recall_state:
-            result = await execute_webhook_task(
-                self.store,
-                delivery_id="delivery-chatwoot-recall-failed",
-                runtime_command=runtime_command,
-            )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["failed_messages"], 1)
-        update_recall_state.assert_awaited_once_with(
-            ANY,
-            chatwoot_conversation_id="588",
-            chatwoot_message_id="599",
-            state="failed",
-            error="message is outside the two-minute recall window",
-        )
-        mappings = await self.repository.find_message_maps_by_remote(
-            self.account.account_id,
-            "599",
-        )
-        self.assertEqual(mappings[0]["state"], "recall_failed")
-        self.assertEqual(
-            mappings[0]["error"],
-            "message is outside the two-minute recall window",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

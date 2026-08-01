@@ -344,16 +344,6 @@ def _message_was_deleted(message: dict[str, Any]) -> bool:
     return value is True or _string(value).lower() == "true"
 
 
-def _message_recall(message: dict[str, Any]) -> dict[str, Any]:
-    attributes = _json_object(message.get("content_attributes"))
-    recall = attributes.get("xianyu_recall") or attributes.get("xianyuRecall")
-    return _json_object(recall)
-
-
-def _message_recall_state(message: dict[str, Any]) -> str:
-    return _string(_message_recall(message).get("state")).lower()
-
-
 def _event_message(payload: dict[str, Any]) -> dict[str, Any]:
     nested = payload.get("message")
     return _json_object(nested) if isinstance(nested, dict) else payload
@@ -3651,37 +3641,6 @@ async def _create_private_recall_snapshot(
     return True
 
 
-async def _update_chatwoot_recall_state(
-    config: dict[str, Any],
-    *,
-    chatwoot_conversation_id: str,
-    chatwoot_message_id: str,
-    state: str,
-    error: str | None = None,
-) -> dict[str, Any]:
-    token = _string(config.get("api_access_token"))
-    chatwoot_account_id = config.get("chatwoot_account_id")
-    if not token or not chatwoot_account_id:
-        raise ChatwootIntegrationError(
-            "撤回状态回写需要 Chatwoot 服务账号令牌与平台账户 ID"
-        )
-    _, body = await run_external_blocking(
-        _chatwoot_request,
-        "POST",
-        (
-            f"{config['base_url']}/api/v1/accounts/{chatwoot_account_id}"
-            f"/conversations/{chatwoot_conversation_id}/messages/"
-            f"{chatwoot_message_id}/xianyu_recall"
-        ),
-        token=token,
-        json_body={
-            "recall_state": state,
-            "recall_error": error,
-        },
-    )
-    return _json_object(body)
-
-
 async def execute_local_message_task(
     store: AccountStore,
     *,
@@ -3702,7 +3661,7 @@ async def execute_local_message_task(
         if mapped.get("state") == "recalled":
             return {"ok": True, "skipped": True, "reason": "recall already mirrored"}
         if not config["api_access_token"] or not config["chatwoot_account_id"]:
-            error = "反向撤回需要 Chatwoot 服务账号令牌与平台账户 ID"
+            error = "同步闲鱼撤回提示需要 Chatwoot 服务账号令牌与平台账户 ID"
             await repository.record_message_map(
                 account_id=account_id,
                 message_pk=message_pk,
@@ -3713,14 +3672,23 @@ async def execute_local_message_task(
                 error=error,
             )
             return {"ok": True, "skipped": True, "reason": error}
-        await _update_chatwoot_recall_state(
+        chatwoot_conversation_id = _string(mapped["chatwoot_conversation_id"])
+        chatwoot_message_id = _string(mapped["chatwoot_message_id"])
+        snapshot_created = False
+        if not await _chatwoot_recall_snapshot_exists(
             config,
-            chatwoot_conversation_id=_string(
-                mapped["chatwoot_conversation_id"]
-            ),
-            chatwoot_message_id=_string(mapped["chatwoot_message_id"]),
-            state="recalled",
-        )
+            chatwoot_conversation_id=chatwoot_conversation_id,
+            chatwoot_message_id=chatwoot_message_id,
+        ):
+            await _create_private_recall_snapshot(
+                config,
+                chatwoot_conversation_id=chatwoot_conversation_id,
+                chatwoot_message_id=chatwoot_message_id,
+                contexts=[context],
+                succeeded=True,
+                error=None,
+            )
+            snapshot_created = True
         await repository.record_message_map(
             account_id=account_id,
             message_pk=message_pk,
@@ -3732,7 +3700,8 @@ async def execute_local_message_task(
         return {
             "ok": True,
             "action": "recalled",
-            "representation": "original_message_state",
+            "representation": "private_snapshot",
+            "private_snapshot_created": snapshot_created,
         }
     if mapped:
         return {"ok": True, "skipped": True, "reason": "already mirrored"}
@@ -4081,7 +4050,6 @@ async def execute_webhook_task(
             message = _event_message(payload)
             remote_message_id = _extract_chatwoot_message_id(payload)
             remote_conversation_id = _extract_chatwoot_conversation_id(payload)
-            recall_state = _message_recall_state(message)
             if not remote_message_id:
                 result = {"ok": True, "skipped": True}
             elif _message_was_deleted(message):
@@ -4326,143 +4294,11 @@ async def execute_webhook_task(
                     }
                     if error:
                         result["error"] = error
-            elif recall_state == "requested":
-                maps = await repository.find_message_maps_by_remote_global(
-                    remote_message_id
-                )
-                mapped_messages = [
-                    item
-                    for item in maps
-                    if item.get("message_pk")
-                    and item.get("chatwoot_conversation_id")
-                ]
-                recall_results: list[dict[str, Any]] = []
-                if not mapped_messages:
-                    recall_results.append(
-                        {
-                            "success": False,
-                            "error": "消息仍在同步或没有闲鱼消息映射，请稍后重试",
-                        }
-                    )
-                for item in mapped_messages:
-                    account_id = _string(item.get("account_id"))
-                    if item.get("state") == "recalled":
-                        recall_results.append(
-                            {
-                                "success": True,
-                                "message_pk": item.get("message_pk"),
-                                "already_recalled": True,
-                            }
-                        )
-                        continue
-                    config = await repository.get_config(account_id=account_id)
-                    if config is None or not config["enabled"]:
-                        recall_results.append(
-                            {
-                                "success": False,
-                                "message_pk": item.get("message_pk"),
-                                "error": "该闲鱼账户的 Chat 同步已关闭",
-                            }
-                        )
-                        continue
-                    try:
-                        recall_result = await runtime_command(
-                            "recall",
-                            account_id,
-                            {
-                                "conversation_id": _string(
-                                    item.get("conversation_id")
-                                )
-                                or _string(
-                                    (
-                                        await repository.get_conversation_map_by_remote(
-                                            account_id,
-                                            _string(
-                                                item.get(
-                                                    "chatwoot_conversation_id"
-                                                )
-                                            ),
-                                        )
-                                        or {}
-                                    ).get("conversation_id")
-                                ),
-                                "message_pk": _string(item.get("message_pk")),
-                            },
-                        )
-                    except Exception as exc:
-                        recall_result = {
-                            "success": False,
-                            "error": str(exc)[:1000],
-                        }
-                    recall_result = _json_object(recall_result)
-                    recall_results.append(recall_result)
-                    if not recall_result.get("success"):
-                        await repository.record_message_map(
-                            account_id=account_id,
-                            message_pk=_remote_id(item.get("message_pk")),
-                            chatwoot_message_id=remote_message_id,
-                            chatwoot_conversation_id=_remote_id(
-                                item.get("chatwoot_conversation_id")
-                            ),
-                            origin=_string(item.get("origin")) or "chatwoot",
-                            state="recall_failed",
-                            error=_string(recall_result.get("error"))
-                            or "闲鱼平台未确认撤回",
-                        )
-                succeeded = bool(recall_results) and all(
-                    item.get("success") for item in recall_results
-                )
-                error = None
-                if not succeeded:
-                    error = "; ".join(
-                        _string(item.get("error")) or "闲鱼平台未确认撤回"
-                        for item in recall_results
-                        if not item.get("success")
-                    )[:1000]
-                status_config = platform_config
-                if mapped_messages:
-                    mapped_config = await repository.get_config(
-                        account_id=_string(mapped_messages[0].get("account_id"))
-                    )
-                    if mapped_config is not None:
-                        status_config = mapped_config
-                if remote_conversation_id:
-                    await _update_chatwoot_recall_state(
-                        status_config,
-                        chatwoot_conversation_id=remote_conversation_id,
-                        chatwoot_message_id=remote_message_id,
-                        state="recalled" if succeeded else "failed",
-                        error=error,
-                    )
-                if succeeded:
-                    for item in mapped_messages:
-                        await repository.record_message_map(
-                            account_id=_string(item.get("account_id")),
-                            message_pk=_remote_id(item.get("message_pk")),
-                            chatwoot_message_id=remote_message_id,
-                            chatwoot_conversation_id=_remote_id(
-                                item.get("chatwoot_conversation_id")
-                            ),
-                            origin=_string(item.get("origin")) or "chatwoot",
-                            state="recalled",
-                        )
-                result = {
-                    "ok": succeeded,
-                    "platform_recall": True,
-                    "recalled_messages": sum(
-                        1 for item in recall_results if item.get("success")
-                    ),
-                    "failed_messages": sum(
-                        1 for item in recall_results if not item.get("success")
-                    ),
-                }
-                if error:
-                    result["error"] = error
             else:
                 result = {
                     "ok": True,
                     "skipped": True,
-                    "reason": "message update is not a delete or recall request",
+                    "reason": "message update is not a delete request",
                 }
         elif event_name == "message_created":
             message = _event_message(payload)
