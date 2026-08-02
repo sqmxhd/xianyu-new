@@ -44,7 +44,7 @@ ensure_dependencies() {
 }
 
 ensure_layout() {
-  local directory
+  local directory path
   for directory in \
     config state releases logs \
     secrets/xianyu \
@@ -59,6 +59,25 @@ ensure_layout() {
   chmod 700 "$DEPLOY_ROOT/secrets" \
     "$DEPLOY_ROOT/certificates/ca/private"
   chmod 755 "$DEPLOY_ROOT/secrets/xianyu"
+  for path in \
+    "$DEPLOY_ROOT/secrets/chatwoot.env" \
+    "$DEPLOY_ROOT/certificates/ca/private/root-ca.key" \
+    "$DEPLOY_ROOT/certificates/ca/private/intermediate-ca.key" \
+    "$DEPLOY_ROOT/certificates/xianyu/privkey.pem" \
+    "$DEPLOY_ROOT/certificates/chatwoot/privkey.pem"
+  do
+    [ ! -e "$path" ] || chmod 600 "$path"
+  done
+  for path in \
+    "$DEPLOY_ROOT/certificates/ca/certs/root-ca.crt" \
+    "$DEPLOY_ROOT/certificates/ca/certs/intermediate-ca.crt" \
+    "$DEPLOY_ROOT/certificates/trust/internal-root.crt" \
+    "$DEPLOY_ROOT/certificates/trust/combined-ca.pem" \
+    "$DEPLOY_ROOT/certificates/xianyu/fullchain.pem" \
+    "$DEPLOY_ROOT/certificates/chatwoot/fullchain.pem"
+  do
+    [ ! -e "$path" ] || chmod 644 "$path"
+  done
 }
 
 guard_legacy_mysql_data() {
@@ -363,9 +382,19 @@ load_docker_archive() {
 
 prepare_official_image() {
   local mode="$1" label="$2" hint="$3" source_image="$4" target_image="$5" archive
+  local attempt
   if [ "$mode" = online ]; then
-    info "正在拉取 $label：$source_image"
-    docker pull "$source_image"
+    for attempt in 1 2 3; do
+      info "正在拉取 $label：$source_image（第 $attempt/3 次）"
+      if docker pull "$source_image"; then
+        break
+      fi
+      if [ "$attempt" -eq 3 ]; then
+        fail "$label 镜像连续 3 次拉取失败；已完成的配置和镜像均会保留，可稍后重新执行"
+      fi
+      warn "$label 镜像拉取中断，3 秒后自动重试"
+      sleep 3
+    done
   else
     archive="$(select_dependency_archive "$label" "$hint")"
     load_docker_archive "$archive"
@@ -411,6 +440,22 @@ current_version() {
   local file="$DEPLOY_ROOT/state/current-release.env"
   [ -f "$file" ] || return 0
   sed -n 's/^RELEASE_VERSION=//p' "$file" | tail -n 1
+}
+
+deployment_complete() {
+  [ -s "$DEPLOY_ROOT/state/deployment-complete.env" ]
+}
+
+mark_deployment_complete() {
+  local target="$DEPLOY_ROOT/state/deployment-complete.env" version
+  version="$(current_version)"
+  umask 077
+  {
+    printf 'RELEASE_VERSION=%s\n' "$version"
+    printf 'COMPLETED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$target.tmp.$$"
+  chmod 600 "$target.tmp.$$"
+  mv -f "$target.tmp.$$" "$target"
 }
 
 compose() {
@@ -480,7 +525,12 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'chatwoot') \gexec
 ALTER DATABASE chatwoot OWNER TO chatwoot;
 SQL
   compose exec -T postgres psql --username postgres --dbname chatwoot \
-    --set=ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+    --set=ON_ERROR_STOP=1 <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
   success "共享 PostgreSQL 已准备：xianyu_admin、chatwoot"
 }
 
@@ -785,13 +835,33 @@ start_stack() {
   prepare_chatwoot_database
   info "正在启动 5 个常驻容器；Compose 只使用脚本已准备好的本地镜像"
   compose up -d --wait --remove-orphans
+  mark_deployment_complete
   success "服务已启动"
   printf '闲鱼管理平台：%s\n' "$(read_config_value XIANYU_PUBLIC_BASE_URL)"
   printf 'Chatwoot：%s\n' "$(read_config_value CHATWOOT_PUBLIC_BASE_URL)"
 }
 
 stop_stack() {
-  compose stop
+  local name found=false
+  local -a names=(
+    xianyu-app xianyu-chatwoot xianyu-chatwoot-worker
+    xianyu-database xianyu-redis
+  )
+  if [ -n "$(current_version)" ] \
+    && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
+    && [ -s "$DEPLOY_ROOT/config/images.env" ]; then
+    compose stop
+  else
+    for name in "${names[@]}"; do
+      if docker container inspect "$name" >/dev/null 2>&1; then
+        docker stop "$name"
+        found=true
+      fi
+    done
+    if [ "$found" = false ]; then
+      info "当前没有需要停止的部署容器"
+    fi
+  fi
   success "服务已停止，数据和配置均已保留"
 }
 
@@ -821,27 +891,49 @@ import_only() {
 
 first_deployment() {
   local package
-  [ -z "$(current_version)" ] || fail "已经存在部署，请使用“安装/升级版本包”"
+  deployment_complete && fail "部署已经完成，请使用“安装/升级版本包”"
   printf '\n首次部署会在脚本同级创建 XIANYU_DATA，导入本项目镜像并启动服务。\n'
   printf '官方依赖镜像可选择在线拉取或从本地官方镜像包导入。\n'
+  printf '中途失败后可再次选择“首次部署”，脚本会保留并复用已经完成的步骤。\n'
   printf 'Compose 项目和容器统一使用固定的 xianyu 名称。\n\n'
   printf '数据目录：%s\n' "$DEPLOY_ROOT"
-  confirm "确认开始首次部署？" || return 0
+  if [ -n "$(current_version)" ]; then
+    confirm "检测到未完成的部署，确认继续完成首次部署？" || return 0
+  else
+    confirm "确认开始首次部署？" || return 0
+  fi
   ensure_layout
-  package="$(select_package)"
-  import_package "$package" true
-  configure_deployment
-  prepare_dependency_images
+  if [ -z "$(current_version)" ]; then
+    package="$(select_package)"
+    import_package "$package" true
+  else
+    success "复用已导入的项目版本 $(current_version)"
+  fi
+  if [ ! -s "$DEPLOY_ROOT/config/deployment.env" ]; then
+    configure_deployment
+  else
+    success "复用已有端口和 URL 配置"
+  fi
+  if [ ! -s "$DEPLOY_ROOT/config/images.env" ]; then
+    prepare_dependency_images
+  else
+    success "复用已准备的官方依赖镜像配置"
+  fi
   ensure_platform_secrets
   ensure_chatwoot_secrets
-  initial_certificate_setup
+  if certificate_ready; then
+    success "复用已有证书配置"
+  else
+    initial_certificate_setup
+  fi
   start_stack
 }
 
 dependency_image_management() {
-  [ -f "$DEPLOY_ROOT/config/deployment.env" ] || fail "请先完成首次部署配置"
   prepare_dependency_images
-  if [ -n "$(current_version)" ] && compose ps --status running -q 2>/dev/null | grep -q .; then
+  if [ -n "$(current_version)" ] \
+    && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
+    && compose ps --status running -q 2>/dev/null | grep -q .; then
     if confirm "依赖镜像已更新，是否立即重建相关容器？"; then
       start_stack
       success "官方依赖容器已更新"
@@ -852,7 +944,14 @@ dependency_image_management() {
 show_status() {
   printf '部署目录：%s\n' "$DEPLOY_ROOT"
   printf '当前版本：%s\n' "$(current_version || true)"
-  if [ -n "$(current_version)" ]; then
+  if deployment_complete; then
+    printf '部署状态：已完成\n'
+  else
+    printf '部署状态：尚未完成，可选择“首次部署”继续\n'
+  fi
+  if [ -n "$(current_version)" ] \
+    && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
+    && [ -s "$DEPLOY_ROOT/config/images.env" ]; then
     compose ps
   fi
 }

@@ -170,6 +170,10 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("\n  postgres:", compose_all)
         self.assertIn("\n  redis:", compose_all)
         self.assertIn("POSTGRES_PASSWORD_FILE:", compose_all)
+        self.assertIn(
+            "command: [postgres, -c, shared_preload_libraries=pg_stat_statements]",
+            compose_all,
+        )
         self.assertNotIn("REDIS_URL: redis://chatwoot-redis:6379", compose_all)
         self.assertIn("XIANYU_REDIS_DATABASE: \"0\"", compose_all)
         self.assertIn("POSTGRES_DATABASE: chatwoot", compose_all)
@@ -220,6 +224,20 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("guard_legacy_mysql_data", deploy)
         self.assertIn("旧数据未被修改", deploy)
         self.assertIn("bundle exec rails db:chatwoot_prepare", deploy)
+        for extension in ("pg_stat_statements", "pg_trgm", "pgcrypto", "vector"):
+            self.assertIn(
+                f"CREATE EXTENSION IF NOT EXISTS {extension};",
+                deploy,
+            )
+        self.assertIn("for attempt in 1 2 3", deploy)
+        self.assertIn("deployment-complete.env", deploy)
+        self.assertIn("检测到未完成的部署", deploy)
+        self.assertIn('certificates/xianyu/privkey.pem"', deploy)
+        self.assertIn('[ ! -e "$path" ] || chmod 600 "$path"', deploy)
+        self.assertNotIn(
+            '[ -z "$(current_version)" ] || fail "已经存在部署',
+            deploy,
+        )
         self.assertIn("证书管理", deploy)
         self.assertIn("99991231235959Z", deploy)
         self.assertIn("CHATWOOT_HTTPS_PORT", deploy)

@@ -55,6 +55,7 @@ services:
     image: "${POSTGRES_IMAGE:?请先运行开始部署.sh准备 pgvector 官方镜像}"
     pull_policy: never
     platform: linux/amd64
+    command: [postgres, -c, shared_preload_libraries=pg_stat_statements]
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres

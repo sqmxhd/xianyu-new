@@ -56,6 +56,14 @@ chmod +x 开始部署.sh
 `XIANYU_DATA`，配置两个 HTTPS 端口和 URL，生成密钥，建立两个 PostgreSQL 数据库，
 执行 Chatwoot 官方初始化，最后启动并检查 5 个常驻容器。
 
+首次部署采用可恢复的分阶段流程。URL 输入、依赖镜像下载、证书生成或数据库初始化
+中途失败时，再次选择“首次部署”会复用已经导入的版本及现有配置，从失败阶段继续，
+不会覆盖证书、密钥或数据。在线依赖镜像拉取会自动重试 3 次。
+
+共享 PostgreSQL 启动时预加载 `pg_stat_statements`。脚本以数据库超级用户在
+`chatwoot` 库中预先创建 `pg_stat_statements`、`pg_trgm`、`pgcrypto` 和 `vector`，
+再由普通 `chatwoot` 用户执行官方 `db:chatwoot_prepare`，不会授予应用超级用户权限。
+
 默认端口为闲鱼平台 `6161`、Chatwoot `6443`。端口被占用时脚本推荐下一个可用
 端口。正式 `docker compose up` 使用 `pull_policy: never`，不会隐式联网。
 
