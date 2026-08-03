@@ -1575,14 +1575,7 @@ export interface ChatwootConfig {
   account_alerts_enabled: boolean;
   offline_alert_delay_seconds: number;
   base_url: string;
-  inbox_identifier: string;
-  chatwoot_inbox_id?: number | null;
-  webhook_secret: string;
-  client_hmac_token?: string | null;
-  api_access_token?: string | null;
   chatwoot_account_id?: number | null;
-  has_webhook_secret: boolean;
-  has_client_hmac_token: boolean;
   has_api_access_token: boolean;
   full_outbound_sync_enabled: boolean;
   account_grouping_enabled: boolean;
@@ -1602,14 +1595,7 @@ export interface ChatwootConfigFormValues {
   account_alerts_enabled: boolean;
   offline_alert_delay_seconds: number;
   base_url: string;
-  inbox_identifier: string;
-  callback_url: string;
-  webhook_secret?: string;
-  client_hmac_token?: string;
-  clear_client_hmac_token?: boolean;
-  chatwoot_account_id?: number | null;
   api_access_token?: string;
-  clear_api_access_token?: boolean;
 }
 
 export interface ChatwootTestResult {

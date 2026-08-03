@@ -62,6 +62,7 @@ from .chatwoot import (
     execute_account_alert_task,
     reconcile_chatwoot_read_states,
     test_chatwoot_config,
+    save_chatwoot_config,
 )
 from .queue import enqueue_background_task
 from .process_health import event_loop_monitor
@@ -2508,8 +2509,8 @@ async def update_chatwoot_config(
     payload: ChatwootConfigUpdatePayload,
 ) -> ChatwootConfigPayload:
     try:
-        saved = await chatwoot_repository.upsert_config(payload)
-    except ValueError as exc:
+        saved = await save_chatwoot_config(chatwoot_repository, payload)
+    except (ValueError, ChatwootIntegrationError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if saved.enabled:
         for account in await store.list_accounts():

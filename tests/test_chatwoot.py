@@ -46,6 +46,7 @@ from apps.api.xianyu_admin_api.chatwoot import (
     execute_account_metadata_task,
     execute_webhook_task,
     reconcile_chatwoot_read_states,
+    save_chatwoot_config,
     verify_chatwoot_signature,
 )
 from apps.api.xianyu_admin_api.database import Base
@@ -357,14 +358,12 @@ class ChatwootAccountIdentityTests(unittest.TestCase):
             account_name="账号甲",
             peer_user_id="same-customer",
             peer_name="同一客户",
-            client_hmac_token=None,
         )
         second = _contact_identity_payload(
             account_id="account-b",
             account_name="账号乙",
             peer_user_id="same-customer",
             peer_name="同一客户",
-            client_hmac_token=None,
         )
 
         self.assertEqual(
@@ -421,6 +420,23 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             initialize=False,
         )
         self.repository = ChatwootRepository(self.session_factory)
+        original_upsert_config = self.repository.upsert_config
+
+        async def upsert_test_config(
+            payload: ChatwootConfigUpdatePayload,
+            *,
+            chatwoot_account_id: int = 3,
+        ):
+            if not payload.api_access_token:
+                payload = payload.model_copy(
+                    update={"api_access_token": "test-service-account-token"}
+                )
+            return await original_upsert_config(
+                payload,
+                chatwoot_account_id=chatwoot_account_id,
+            )
+
+        self.repository.upsert_config = upsert_test_config
         self.account = await self.store.create_account(
             AccountCreatePayload(
                 enabled=True,
@@ -555,37 +571,74 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(call.kwargs["files"][0][1][0], "original.jpg")
 
-    async def test_config_secrets_are_encrypted_and_exposed_to_admin_payload(self) -> None:
+    async def test_service_account_token_is_encrypted_and_redacted(self) -> None:
         config = await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 account_alerts_enabled=True,
                 offline_alert_delay_seconds=180,
                 base_url="http://chatwoot.internal:3000/",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                client_hmac_token="client-hmac-token",
-                chatwoot_account_id=1,
                 api_access_token="service-account-token",
             )
         )
 
-        self.assertTrue(config.has_webhook_secret)
-        self.assertTrue(config.has_client_hmac_token)
         self.assertTrue(config.has_api_access_token)
         self.assertTrue(config.full_outbound_sync_enabled)
         self.assertTrue(config.account_alerts_enabled)
         self.assertEqual(config.offline_alert_delay_seconds, 180)
         self.assertFalse(config.account_grouping_enabled)
-        self.assertEqual(config.webhook_secret, "webhook-secret-value")
-        self.assertEqual(config.client_hmac_token, "client-hmac-token")
-        self.assertEqual(config.api_access_token, "service-account-token")
+        self.assertNotIn("api_access_token", config.model_dump())
         with self.session_factory() as session:
             row = session.scalar(select(ChatwootConfigORM))
             assert row is not None
-            self.assertNotEqual(row.webhook_secret_encrypted, "webhook-secret-value")
-            self.assertNotEqual(row.client_hmac_token_encrypted, "client-hmac-token")
             self.assertNotEqual(row.api_access_token_encrypted, "service-account-token")
+
+    async def test_save_config_detects_administrator_account(self) -> None:
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+            return_value=(
+                200,
+                {
+                    "id": 21,
+                    "accounts": [
+                        {"id": 7, "name": "服务平台", "role": "administrator"}
+                    ],
+                },
+            ),
+        ) as request:
+            saved = await save_chatwoot_config(
+                self.repository,
+                ChatwootConfigUpdatePayload(
+                    enabled=True,
+                    base_url="https://chatwoot.internal/",
+                    api_access_token="service-account-token",
+                ),
+            )
+
+        self.assertEqual(saved.chatwoot_account_id, 7)
+        self.assertEqual(saved.base_url, "https://chatwoot.internal")
+        self.assertEqual(request.call_args.kwargs["token"], "service-account-token")
+
+    async def test_save_config_rejects_non_administrator(self) -> None:
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+            return_value=(
+                200,
+                {"id": 21, "accounts": [{"id": 7, "role": "agent"}]},
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ChatwootIntegrationError,
+                "administrator",
+            ):
+                await save_chatwoot_config(
+                    self.repository,
+                    ChatwootConfigUpdatePayload(
+                        enabled=True,
+                        base_url="https://chatwoot.internal",
+                        api_access_token="service-account-token",
+                    ),
+                )
 
     async def test_offline_alert_is_delayed_and_enqueued_once(self) -> None:
         queued_task = SimpleNamespace(task_id="task-alert", status="pending")
@@ -663,9 +716,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 enabled=True,
                 account_alerts_enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-token",
             )
         )
@@ -737,9 +787,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-token",
             )
         )
@@ -805,11 +852,8 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
             )
         )
-        await self.repository.remember_legacy_inbox_id(1)
         binding = await self.repository.upsert_inbox_binding(
             account_id=self.account.account_id,
             chatwoot_inbox_id=9,
@@ -820,10 +864,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(binding["chatwoot_inbox_id"], 9)
-        self.assertEqual(
-            await self.repository.get_config_secret(1),
-            "legacy-webhook-secret",
-        )
+        self.assertIsNone(await self.repository.get_config_secret(1))
         self.assertEqual(
             await self.repository.get_config_secret(9),
             "managed-webhook-secret",
@@ -832,7 +873,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         payload = await self.repository.get_config_payload()
         assert payload is not None
         self.assertEqual(payload.managed_inbox_count, 1)
-        self.assertFalse(payload.account_grouping_enabled)
+        self.assertTrue(payload.account_grouping_enabled)
 
     async def test_legacy_conversation_is_remapped_to_managed_account_inbox(
         self,
@@ -841,9 +882,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-account-token",
             )
         )
@@ -962,9 +1000,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-account-token",
             )
         )
@@ -1095,10 +1130,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                callback_url="https://xianyu.test/chatwoot/webhook",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-account-token",
             )
         )
@@ -1107,24 +1138,25 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         assert config is not None
         remote_label: dict[str, object] | None = None
+        remote_inbox: dict[str, object] | None = None
 
         def fake_request(
             method: str,
             url: str,
             **kwargs: object,
         ) -> tuple[int, object]:
-            nonlocal remote_label
+            nonlocal remote_inbox, remote_label
             if method == "GET" and url.endswith("/profile"):
                 return 200, {"id": 21}
             if method == "GET" and "/inbox_members/" in url:
                 return 200, {"payload": [{"id": 21}]}
             if method == "GET" and url.endswith("/inboxes"):
-                return 200, []
+                return 200, [remote_inbox] if remote_inbox else []
             if method == "POST" and url.endswith("/inboxes"):
                 self.assertFalse(
                     kwargs["json_body"]["lock_to_single_conversation"]
                 )
-                return 200, {
+                remote_inbox = {
                     "id": 9,
                     "name": "🔴 [闲鱼] chatwoot-test",
                     "channel_type": "Channel::Api",
@@ -1132,26 +1164,29 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                     "secret": "managed-webhook-secret",
                     "lock_to_single_conversation": False,
                 }
+                return 200, remote_inbox
             if method == "PATCH" and url.endswith("/inboxes/9"):
+                self.assertFalse(kwargs["json_body"]["channel"]["hmac_mandatory"])
                 self.assertEqual(
-                    kwargs["json_body"],
-                    {
-                        "name": "🔴 [闲鱼] chatwoot-test",
-                        "lock_to_single_conversation": False,
-                    },
+                    kwargs["json_body"]["channel"]["webhook_url"],
+                    "/api/integrations/chatwoot/webhook",
                 )
                 return 200, {}
             if method == "GET" and url.endswith("/labels"):
                 return 200, {"payload": [remote_label] if remote_label else []}
             if method == "POST" and url.endswith("/labels"):
+                request_body = kwargs["json_body"]
+                self.assertEqual(set(request_body), {"label"})
+                label_body = request_body["label"]
                 remote_label = {
                     "id": 17,
-                    "title": _account_label_title(
-                        "chatwoot-test",
-                        self.account.account_id,
-                    ),
-                    "description": f"闲鱼账号:{self.account.account_id}",
+                    **label_body,
                 }
+                return 200, remote_label
+            if method == "PATCH" and url.endswith("/labels/17"):
+                request_body = kwargs["json_body"]
+                self.assertEqual(set(request_body), {"label"})
+                remote_label = {"id": 17, **request_body["label"]}
                 return 200, remote_label
             raise AssertionError(f"unexpected request: {method} {url}")
 
@@ -1163,6 +1198,8 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.repository,
                 config,
             )
+            assert remote_label is not None
+            remote_label["title"] = "stale-account-label"
             again = await _ensure_managed_account_inbox(
                 self.repository,
                 resolved,
@@ -1189,13 +1226,21 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 if call.args[0] == "PATCH"
                 and call.args[1].endswith("/inboxes/9")
             ),
-            1,
+            2,
         )
         self.assertEqual(
             sum(
                 1
                 for call in request.call_args_list
                 if call.args[0] == "POST" and call.args[1].endswith("/labels")
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                1
+                for call in request.call_args_list
+                if call.args[0] == "PATCH" and call.args[1].endswith("/labels/17")
             ),
             1,
         )
@@ -1210,10 +1255,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                callback_url="https://xianyu.test/chatwoot/webhook",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
-                chatwoot_account_id=3,
                 api_access_token="service-account-token",
             )
         )
@@ -1247,6 +1288,8 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                     "secret": "managed-webhook-secret",
                     "lock_to_single_conversation": False,
                 }
+            if method == "PATCH" and url.endswith("/inboxes/9"):
+                return 200, {}
             if url.endswith("/labels"):
                 raise ChatwootIntegrationError("Chatwoot API HTTP 500")
             raise AssertionError(f"unexpected request: {method} {url}")
@@ -1254,7 +1297,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
             side_effect=fake_request,
-        ):
+        ) as request:
             resolved = await _ensure_managed_account_inbox(
                 self.repository,
                 config,
@@ -1263,19 +1306,23 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resolved["managed_inbox"])
         self.assertEqual(resolved["chatwoot_inbox_id"], 9)
         self.assertIn("HTTP 500", resolved["label_error"])
+        self.assertFalse(
+            any(
+                call.args[0] == "POST" and call.args[1].endswith("/labels")
+                for call in request.call_args_list
+            )
+        )
         payload = await self.repository.get_config_payload()
         assert payload is not None
         self.assertTrue(payload.account_grouping_enabled)
 
-    async def test_metadata_backfill_updates_visible_contact_without_service_token(
+    async def test_metadata_backfill_updates_visible_contact_with_managed_inbox(
         self,
     ) -> None:
         await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
             )
         )
         contact = await self.repository.ensure_contact_map(
@@ -1290,23 +1337,48 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             peer_user_id="buyer-visible",
             source_id=str(contact["source_id"]),
             chatwoot_conversation_id="108",
-            chatwoot_inbox_id=1,
-            inbox_identifier="legacy-inbox",
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
         )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="managed-webhook-secret",
+            label_id=None,
+            label_title=None,
+        )
+        config = await self.repository.get_config(account_id=self.account.account_id)
+        assert config is not None
 
-        with patch(
-            "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
-            return_value=(200, {}),
-        ) as request:
+        with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._ensure_custom_attribute_definitions",
+                new=AsyncMock(return_value=0),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._ensure_managed_account_inbox",
+                new=AsyncMock(return_value=config),
+            ),
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._chatwoot_request",
+                return_value=(200, {}),
+            ) as request,
+        ):
             result = await execute_account_metadata_task(
                 self.store,
                 account_id=self.account.account_id,
                 reason="test",
             )
 
-        self.assertFalse(result["token_ready"])
+        self.assertTrue(result["token_ready"])
         self.assertEqual(result["contact_updates"], 1)
-        payload = request.call_args.kwargs["json_body"]
+        identity_call = next(
+            call
+            for call in request.call_args_list
+            if call.args[0] == "PATCH" and "/public/api/v1/inboxes/" in call.args[1]
+        )
+        payload = identity_call.kwargs["json_body"]
         self.assertEqual(payload["name"], "闲鱼｜chatwoot-test")
         self.assertEqual(
             payload["custom_attributes"]["xianyu_account_name"],
@@ -1314,7 +1386,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         config_payload = await self.repository.get_config_payload()
         assert config_payload is not None
-        self.assertEqual(config_payload.status, "degraded")
+        self.assertEqual(config_payload.status, "ready")
 
     async def test_metadata_backfill_keeps_historic_disabled_account_identifiable(
         self,
@@ -1323,8 +1395,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="legacy-inbox",
-                webhook_secret="legacy-webhook-secret",
             )
         )
         contact = await self.repository.ensure_contact_map(
@@ -1369,8 +1439,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         await self.repository.create_conversation_map(
@@ -1385,7 +1453,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="https://chatwoot.internal",
-                inbox_identifier="inbox-identifier",
             )
         )
 
@@ -1409,8 +1476,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
                 ChatwootConfigUpdatePayload(
                     enabled=True,
                     base_url="https://192.168.201.2",
-                    inbox_identifier="inbox-identifier",
-                    webhook_secret="webhook-secret-value",
                 )
             )
 
@@ -1419,27 +1484,25 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             "https://192.168.2.3/api/integrations/chatwoot/webhook",
         )
 
-    async def test_config_persists_custom_callback_url(self) -> None:
-        config = await self.repository.upsert_config(
-            ChatwootConfigUpdatePayload(
-                enabled=True,
-                base_url="https://chatwoot.internal",
-                inbox_identifier="inbox-identifier",
-                callback_url="https://xianyu.example.test/hooks/chatwoot",
-                webhook_secret="webhook-secret-value",
+    async def test_config_callback_is_always_derived_from_public_url(self) -> None:
+        with patch(
+            "apps.api.xianyu_admin_api.chatwoot.settings",
+            SimpleNamespace(
+                public_base_url="https://xianyu.example.test",
+                chatwoot_ca_bundle="",
+            ),
+        ):
+            config = await self.repository.upsert_config(
+                ChatwootConfigUpdatePayload(
+                    enabled=True,
+                    base_url="https://chatwoot.internal",
+                    api_access_token="service-account-token",
+                )
             )
-        )
 
-        loaded = await self.repository.get_config_payload()
         self.assertEqual(
             config.callback_url,
-            "https://xianyu.example.test/hooks/chatwoot",
-        )
-        self.assertIsNotNone(loaded)
-        assert loaded is not None
-        self.assertEqual(
-            loaded.callback_url,
-            "https://xianyu.example.test/hooks/chatwoot",
+            "https://xianyu.example.test/api/integrations/chatwoot/webhook",
         )
 
     def test_chatwoot_request_uses_configured_ca_bundle(self) -> None:
@@ -1511,15 +1574,22 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
+        )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="webhook-secret-value",
+            label_id=None,
+            label_title=None,
         )
         body = json.dumps(
             {
                 "event": "message_created",
                 "id": 42,
                 "account": {"id": 3},
+                "inbox": {"id": 9},
             },
             separators=(",", ":"),
         ).encode()
@@ -1595,8 +1665,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         enabled = await self.repository.get_config(account_id=self.account.account_id)
@@ -1616,8 +1684,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         await self.store.record_message(
@@ -1690,9 +1756,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -1762,8 +1825,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         message = await self.store.record_message(
@@ -1791,9 +1852,25 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             peer_user_id="buyer-local-audio",
             source_id="source-local-audio",
             chatwoot_conversation_id="288",
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
         )
+        await self.repository.upsert_inbox_binding(
+            account_id=self.account.account_id,
+            chatwoot_inbox_id=9,
+            inbox_identifier="managed-inbox",
+            webhook_secret="managed-webhook-secret",
+            label_id=None,
+            label_title=None,
+        )
+        config = await self.repository.get_config(account_id=self.account.account_id)
+        assert config is not None
 
         with (
+            patch(
+                "apps.api.xianyu_admin_api.chatwoot._ensure_managed_account_inbox",
+                new=AsyncMock(return_value=config),
+            ),
             patch(
                 "apps.api.xianyu_admin_api.chatwoot._download_xianyu_audio",
                 return_value=(b"#!AMR\nvoice-bytes", "audio/amr", "voice.amr"),
@@ -1823,9 +1900,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -1907,8 +1981,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         await self.store.record_message(
@@ -1968,9 +2040,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -2087,8 +2156,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         await self.store.record_message(
@@ -2147,9 +2214,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -2283,9 +2347,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -2392,9 +2453,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
-                chatwoot_account_id=1,
                 api_access_token="service-token",
             )
         )
@@ -2493,8 +2551,6 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
             ChatwootConfigUpdatePayload(
                 enabled=True,
                 base_url="http://chatwoot.internal:3000",
-                inbox_identifier="inbox-identifier",
-                webhook_secret="webhook-secret-value",
             )
         )
         inbound = await self.store.record_message(

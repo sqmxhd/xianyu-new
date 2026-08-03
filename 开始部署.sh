@@ -9,6 +9,10 @@ DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"
 COMPOSE_FILE="$SCRIPT_DIR/compose.all.yml"
 PACKAGE_GLOB="xianyu-admin-*-linux-amd64.docker.tar.gz"
 COMPOSE_PROJECT_NAME="xianyu"
+UPGRADE_ROLLBACK_ACTIVE=false
+UPGRADE_BACKUP_RELEASE=""
+UPGRADE_BACKUP_IMAGE=""
+UPGRADE_PREVIOUS_IMAGE=""
 
 info() { printf '\033[1;34m[信息]\033[0m %s\n' "$*"; }
 success() { printf '\033[1;32m[完成]\033[0m %s\n' "$*"; }
@@ -39,6 +43,7 @@ ensure_dependencies() {
   require_command tar
   require_command gzip
   require_command sha256sum
+  require_command sort
   docker compose version >/dev/null 2>&1 || fail "需要 Docker Compose v2（docker compose）"
   [ -f "$COMPOSE_FILE" ] || fail "缺少 Docker 配置文件：$COMPOSE_FILE"
 }
@@ -266,23 +271,36 @@ configure_deployment() {
   success "部署参数已保存到 $target"
 }
 
+package_version() {
+  local filename
+  filename="$(basename -- "$1")"
+  filename="${filename#xianyu-admin-}"
+  printf '%s\n' "${filename%-linux-amd64.docker.tar.gz}"
+}
+
 list_packages() {
   local packages=()
   shopt -s nullglob
   packages=("$SCRIPT_DIR"/$PACKAGE_GLOB)
   shopt -u nullglob
-  printf '%s\n' "${packages[@]}"
+  printf '%s\n' "${packages[@]}" | LC_ALL=C sort -V -r
 }
 
 select_package() {
-  local packages=() index choice
+  local packages=() index choice version marker current
   while IFS= read -r choice; do
     [ -n "$choice" ] && packages+=("$choice")
   done < <(list_packages)
   [ "${#packages[@]}" -gt 0 ] || fail "脚本同级目录未找到 $PACKAGE_GLOB"
+  current="$(current_version)"
   printf '\n可用版本包：\n' >&2
   for index in "${!packages[@]}"; do
-    printf '  %d) %s\n' "$((index + 1))" "$(basename -- "${packages[$index]}")" >&2
+    version="$(package_version "${packages[$index]}")"
+    marker=""
+    [ "$index" -ne 0 ] || marker=" （最新/推荐）"
+    [ -z "$current" ] || [ "$version" != "$current" ] || marker="$marker （当前版本）"
+    printf '  %d) %s%s\n' \
+      "$((index + 1))" "$(basename -- "${packages[$index]}")" "$marker" >&2
   done
   read -r -p "请选择版本 [1]: " choice
   choice="${choice:-1}"
@@ -302,11 +320,10 @@ verify_outer_checksum() {
 
 import_package() {
   local package="$1" activate="${2:-true}" filename version source_image target_image
-  local release_dir architecture
+  local release_dir architecture image_id image_version image_revision
   verify_outer_checksum "$package"
   filename="$(basename -- "$package")"
-  version="${filename#xianyu-admin-}"
-  version="${version%-linux-amd64.docker.tar.gz}"
+  version="$(package_version "$filename")"
   [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || fail "无法从文件名识别项目版本"
   source_image="xianyu/xianyu-admin:$version"
   target_image="xianyu-local/admin:$version"
@@ -317,7 +334,12 @@ import_package() {
     fail "镜像包未包含预期标签：$source_image"
   architecture="$(docker image inspect --format '{{.Architecture}}' "$source_image")"
   [ "$architecture" = amd64 ] || fail "项目镜像架构不是 linux/amd64：$architecture"
+  image_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$source_image")"
+  [ "$image_version" = "$version" ] ||
+    fail "镜像内部版本与文件名不一致：文件=$version，镜像=${image_version:-未标记}"
+  image_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$source_image")"
   docker tag "$source_image" "$target_image"
+  image_id="$(docker image inspect --format '{{.Id}}' "$target_image")"
 
   ensure_layout
   release_dir="$DEPLOY_ROOT/releases/$version"
@@ -325,6 +347,8 @@ import_package() {
   {
     printf 'RELEASE_VERSION=%s\n' "$version"
     printf 'XIANYU_IMAGE=%s\n' "$target_image"
+    printf 'XIANYU_IMAGE_ID=%s\n' "$image_id"
+    printf 'XIANYU_IMAGE_REVISION=%s\n' "$image_revision"
   } > "$release_dir/release.env.tmp.$$"
   chmod 600 "$release_dir/release.env.tmp.$$"
   mv -f "$release_dir/release.env.tmp.$$" "$release_dir/release.env"
@@ -498,6 +522,56 @@ verify_runtime_images() {
   done
 }
 
+verify_running_app_release() {
+  local release_file="$DEPLOY_ROOT/state/current-release.env"
+  local version reference recorded_id target_id running_id image_version health
+  [ -f "$release_file" ] || fail "尚未安装版本包"
+  version="$(sed -n 's/^RELEASE_VERSION=//p' "$release_file" | tail -n 1)"
+  reference="$(sed -n 's/^XIANYU_IMAGE=//p' "$release_file" | tail -n 1)"
+  recorded_id="$(sed -n 's/^XIANYU_IMAGE_ID=//p' "$release_file" | tail -n 1)"
+  [ -n "$version" ] && [ -n "$reference" ] || fail "当前版本记录不完整"
+  target_id="$(docker image inspect --format '{{.Id}}' "$reference")"
+  if [ -n "$recorded_id" ] && [ "$recorded_id" != "$target_id" ]; then
+    fail "当前镜像标签已指向其他镜像：记录=$recorded_id，实际=$target_id"
+  fi
+  image_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$reference")"
+  [ "$image_version" = "$version" ] ||
+    fail "当前镜像版本标记异常：期望=$version，实际=${image_version:-未标记}"
+  running_id="$(docker container inspect --format '{{.Image}}' xianyu-app 2>/dev/null)" ||
+    fail "闲鱼应用容器未运行"
+  [ "$running_id" = "$target_id" ] ||
+    fail "应用容器仍在使用旧镜像：容器=$running_id，目标=$target_id"
+  health="$(docker container inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' xianyu-app)"
+  [ "$health" = healthy ] || fail "闲鱼应用容器健康状态异常：$health"
+  success "运行版本已核验：$version（$target_id）"
+}
+
+rollback_upgrade_on_exit() {
+  local status="$1"
+  trap - EXIT
+  [ "$UPGRADE_ROLLBACK_ACTIVE" = true ] || exit "$status"
+  set +e
+  warn "新版本未能通过启动校验，正在恢复升级前的应用镜像"
+  if [ -n "$UPGRADE_BACKUP_RELEASE" ] && [ -f "$UPGRADE_BACKUP_RELEASE" ]; then
+    install -m 600 "$UPGRADE_BACKUP_RELEASE" "$DEPLOY_ROOT/state/current-release.env"
+    if [ -n "$UPGRADE_BACKUP_IMAGE" ] && [ -n "$UPGRADE_PREVIOUS_IMAGE" ]; then
+      docker tag "$UPGRADE_BACKUP_IMAGE" "$UPGRADE_PREVIOUS_IMAGE" >/dev/null 2>&1
+    fi
+    if [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
+      && [ -s "$DEPLOY_ROOT/config/images.env" ]; then
+      compose up -d --wait --no-deps --force-recreate xianyu-app >/dev/null 2>&1
+      mark_deployment_complete
+    fi
+  else
+    rm -f "$DEPLOY_ROOT/state/current-release.env"
+    docker stop xianyu-app >/dev/null 2>&1
+  fi
+  [ -z "$UPGRADE_BACKUP_RELEASE" ] || rm -f "$UPGRADE_BACKUP_RELEASE"
+  [ -z "$UPGRADE_BACKUP_IMAGE" ] || docker image rm "$UPGRADE_BACKUP_IMAGE" >/dev/null 2>&1
+  warn "升级失败，已尝试恢复旧版本；新导入镜像仍保留便于排查"
+  exit "$status"
+}
+
 initialize_shared_databases() {
   local xianyu_password chatwoot_password
   xianyu_password="$(tr -d '\r\n' < "$DEPLOY_ROOT/secrets/xianyu/postgres-password")"
@@ -583,6 +657,54 @@ validate_site_certificate() {
       -untrusted "$fullchain" "$fullchain" >/dev/null 2>&1 ||
       fail "网站证书链无法通过当前根证书/系统 CA 验证"
   fi
+}
+
+url_host() {
+  local value="$1" authority
+  authority="${value#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" == \[*\]* ]]; then
+    authority="${authority#\[}"
+    printf '%s\n' "${authority%%\]*}"
+    return
+  fi
+  printf '%s\n' "${authority%%:*}"
+}
+
+validate_certificate_san() {
+  local service="$1" fullchain="$2" public_url="$3" host
+  host="$(url_host "$public_url")"
+  [ -n "$host" ] || fail "$service 访问地址无法解析主机名：$public_url"
+  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$host" == *:* ]]; then
+    openssl x509 -in "$fullchain" -noout -checkip "$host" >/dev/null 2>&1 ||
+      fail "$service 网站证书 SAN 不包含访问 IP：$host"
+  else
+    openssl x509 -in "$fullchain" -noout -checkhost "$host" >/dev/null 2>&1 ||
+      fail "$service 网站证书 SAN 不包含访问域名：$host"
+  fi
+}
+
+validate_installed_certificates() {
+  local xianyu_url chatwoot_url
+  certificate_ready || fail "证书配置不完整，请先进入“证书管理”"
+  refresh_combined_ca
+  xianyu_url="$(read_config_value XIANYU_PUBLIC_BASE_URL)"
+  chatwoot_url="$(read_config_value CHATWOOT_PUBLIC_BASE_URL)"
+  validate_site_certificate \
+    "$DEPLOY_ROOT/certificates/xianyu/fullchain.pem" \
+    "$DEPLOY_ROOT/certificates/xianyu/privkey.pem"
+  validate_certificate_san \
+    "闲鱼管理平台" \
+    "$DEPLOY_ROOT/certificates/xianyu/fullchain.pem" \
+    "$xianyu_url"
+  validate_site_certificate \
+    "$DEPLOY_ROOT/certificates/chatwoot/fullchain.pem" \
+    "$DEPLOY_ROOT/certificates/chatwoot/privkey.pem"
+  validate_certificate_san \
+    "Chatwoot" \
+    "$DEPLOY_ROOT/certificates/chatwoot/fullchain.pem" \
+    "$chatwoot_url"
+  success "网站证书、私钥、证书链、有效期和访问地址 SAN 校验通过"
 }
 
 install_site_certificate() {
@@ -824,7 +946,8 @@ certificate_management() {
 }
 
 start_stack() {
-  certificate_ready || fail "证书配置不完整，请先进入“证书管理”"
+  local force_recreate_app="${1:-false}"
+  validate_installed_certificates
   guard_legacy_mysql_data
   ensure_platform_secrets
   ensure_chatwoot_secrets
@@ -834,7 +957,15 @@ start_stack() {
   initialize_shared_databases
   prepare_chatwoot_database
   info "正在启动 5 个常驻容器；Compose 只使用脚本已准备好的本地镜像"
-  compose up -d --wait --remove-orphans
+  if [ "$force_recreate_app" = true ]; then
+    compose up -d --wait --remove-orphans \
+      postgres redis chatwoot-rails chatwoot-sidekiq
+    info "正在用新镜像强制重建闲鱼应用容器"
+    compose up -d --wait --no-deps --force-recreate xianyu-app
+  else
+    compose up -d --wait --remove-orphans
+  fi
+  verify_running_app_release
   mark_deployment_complete
   success "服务已启动"
   printf '闲鱼管理平台：%s\n' "$(read_config_value XIANYU_PUBLIC_BASE_URL)"
@@ -866,18 +997,51 @@ stop_stack() {
 }
 
 upgrade_stack() {
-  local package before after
+  local package before after selected_version current_release previous_image
+  local backup_tag="" backup_release=""
   package="$(select_package)"
   before="$(current_version)"
+  selected_version="$(package_version "$package")"
   printf '当前版本：%s\n' "${before:-未安装}"
   printf '选择文件：%s\n' "$(basename -- "$package")"
+  if [ -n "$before" ] && [ "$selected_version" = "$before" ]; then
+    confirm "选择的是当前版本，是否强制重新导入并重建应用容器？" || return 0
+  fi
   confirm "确认导入并切换到此版本？现有数据、配置、证书和密钥不会被修改。" || return 0
+
+  ensure_layout
+  current_release="$DEPLOY_ROOT/state/current-release.env"
+  if [ -f "$current_release" ]; then
+    backup_release="$DEPLOY_ROOT/state/.pre-upgrade-release.$$"
+    install -m 600 "$current_release" "$backup_release"
+    previous_image="$(sed -n 's/^XIANYU_IMAGE=//p' "$current_release" | tail -n 1)"
+    if [ -n "$previous_image" ] && docker image inspect "$previous_image" >/dev/null 2>&1; then
+      backup_tag="xianyu-local/admin:rollback-$(date +%s)-$$"
+      docker tag "$previous_image" "$backup_tag"
+    fi
+  else
+    previous_image=""
+  fi
+  UPGRADE_BACKUP_RELEASE="$backup_release"
+  UPGRADE_BACKUP_IMAGE="$backup_tag"
+  UPGRADE_PREVIOUS_IMAGE="$previous_image"
+  UPGRADE_ROLLBACK_ACTIVE=true
+  trap 'rollback_upgrade_on_exit "$?"' EXIT
+
   import_package "$package" true
   after="$(current_version)"
   if [ -f "$DEPLOY_ROOT/config/deployment.env" ] && certificate_ready; then
-    start_stack
+    start_stack true
+    UPGRADE_ROLLBACK_ACTIVE=false
+    trap - EXIT
+    [ -z "$backup_release" ] || rm -f "$backup_release"
+    [ -z "$backup_tag" ] || docker image rm "$backup_tag" >/dev/null 2>&1 || true
     success "已从 ${before:-未安装} 升级到 $after"
   else
+    UPGRADE_ROLLBACK_ACTIVE=false
+    trap - EXIT
+    [ -z "$backup_release" ] || rm -f "$backup_release"
+    [ -z "$backup_tag" ] || docker image rm "$backup_tag" >/dev/null 2>&1 || true
     success "版本 $after 已安装；完成配置和证书后即可启动"
   fi
 }

@@ -2005,7 +2005,6 @@ export default function App() {
   const selectedBrowserIdentity = Form.useWatch("browser_identity", form);
   const [proxyForm] = Form.useForm<ProxyFormValues>();
   const [chatwootForm] = Form.useForm<ChatwootConfigFormValues>();
-  const chatwootCallbackUrlValue = Form.useWatch("callback_url", chatwootForm);
   const [sendForm] = Form.useForm<SendTextFormValues>();
   const [quickPhraseForm] = Form.useForm<QuickPhraseFormValues>();
   const [ruleForm] = Form.useForm<AutoReplyRuleFormValues>();
@@ -5485,14 +5484,7 @@ export default function App() {
         account_alerts_enabled: result.account_alerts_enabled,
         offline_alert_delay_seconds: result.offline_alert_delay_seconds,
         base_url: result.base_url,
-        inbox_identifier: result.inbox_identifier,
-        callback_url: result.callback_url,
-        webhook_secret: result.webhook_secret,
-        client_hmac_token: result.client_hmac_token || "",
-        clear_client_hmac_token: false,
-        chatwoot_account_id: result.chatwoot_account_id ?? null,
-        api_access_token: result.api_access_token || "",
-        clear_api_access_token: false
+        api_access_token: ""
       });
     } catch (error) {
       message.error(error instanceof Error ? error.message : "加载 Chatwoot 配置失败");
@@ -5574,8 +5566,6 @@ export default function App() {
     try {
       const saved = await saveChatwootConfig({
         ...values,
-        webhook_secret: values.webhook_secret || undefined,
-        client_hmac_token: values.client_hmac_token || undefined,
         api_access_token: values.api_access_token || undefined
       });
       setChatwootConfig(saved);
@@ -5584,14 +5574,7 @@ export default function App() {
         account_alerts_enabled: saved.account_alerts_enabled,
         offline_alert_delay_seconds: saved.offline_alert_delay_seconds,
         base_url: saved.base_url,
-        inbox_identifier: saved.inbox_identifier,
-        callback_url: saved.callback_url,
-        webhook_secret: saved.webhook_secret,
-        client_hmac_token: saved.client_hmac_token || "",
-        clear_client_hmac_token: false,
-        chatwoot_account_id: saved.chatwoot_account_id ?? null,
-        api_access_token: saved.api_access_token || "",
-        clear_api_access_token: false
+        api_access_token: ""
       });
       message.success("Chatwoot 配置已保存");
     } catch (error) {
@@ -13153,9 +13136,7 @@ export default function App() {
             initialValues={{
               enabled: false,
               account_alerts_enabled: true,
-              offline_alert_delay_seconds: 120,
-              clear_client_hmac_token: false,
-              clear_api_access_token: false
+              offline_alert_delay_seconds: 120
             }}
           >
             <div className="message-service-section">
@@ -13200,8 +13181,8 @@ export default function App() {
                 </Form.Item>
                 <Form.Item label="当前链路">
                   <Space size={6} wrap className="chatwoot-config-status">
-                    <Tag color={chatwootConfig?.has_webhook_secret ? "green" : "red"}>
-                      Webhook {chatwootConfig?.has_webhook_secret ? "已配置" : "未配置"}
+                    <Tag color={chatwootConfig?.has_api_access_token ? "green" : "red"}>
+                      服务账号 {chatwootConfig?.has_api_access_token ? "已配置" : "未配置"}
                     </Tag>
                     <Tag color={chatwootConfig?.full_outbound_sync_enabled ? "green" : "orange"}>
                       {chatwootConfig?.full_outbound_sync_enabled ? "完整双向同步" : "基础链路"}
@@ -13219,7 +13200,7 @@ export default function App() {
             <div className="message-service-section">
               <div className="message-service-section-heading">
                 <Text strong>连接参数</Text>
-                <Text type="secondary">Chatwoot 地址、收件箱和回调入口</Text>
+                <Text type="secondary">只需填写 Chatwoot 地址，其余信息由服务端自动识别</Text>
               </div>
               <div className="chatwoot-config-grid message-service-fields">
                 <Form.Item
@@ -13229,15 +13210,11 @@ export default function App() {
                 >
                   <Input placeholder="https://192.168.201.2" />
                 </Form.Item>
-                <Form.Item name="chatwoot_account_id" label="Chatwoot 平台账户 ID">
-                  <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-                </Form.Item>
-                <Form.Item
-                  name="inbox_identifier"
-                  label="收件箱标识符"
-                  rules={[{ required: true, message: "请输入 API Inbox 标识符" }]}
-                >
-                  <Input />
+                <Form.Item label="自动识别的 Chatwoot 账户 ID">
+                  <div className="message-service-readonly">
+                    <Text>{chatwootConfig?.chatwoot_account_id ?? "保存后自动识别"}</Text>
+                    <Text type="secondary">来源于管理员服务账号资料</Text>
+                  </div>
                 </Form.Item>
                 <Form.Item label="账户范围">
                   <div className="message-service-readonly">
@@ -13249,24 +13226,13 @@ export default function App() {
                     </Text>
                   </div>
                 </Form.Item>
-                <Form.Item
-                  name="callback_url"
-                  label="Webhook 地址"
-                  className="chatwoot-config-span-2"
-                  extra="在 Chatwoot API Inbox 中填写此回调地址"
-                  rules={[
-                    { required: true, message: "请输入 Webhook 地址" },
-                    { type: "url", message: "请输入完整的 http:// 或 https:// 地址" }
-                  ]}
-                >
-                  <Input
-                    placeholder="https://192.168.2.3/api/integrations/chatwoot/webhook"
-                    suffix={
-                      chatwootCallbackUrlValue ? (
-                        <Text copyable={{ text: chatwootCallbackUrlValue }} />
-                      ) : null
-                    }
-                  />
+                <Form.Item label="Webhook 地址" className="chatwoot-config-span-2">
+                  <div className="message-service-readonly">
+                    <Text copyable={chatwootConfig?.callback_url ? { text: chatwootConfig.callback_url } : undefined}>
+                      {chatwootConfig?.callback_url || "由平台访问地址自动生成"}
+                    </Text>
+                    <Text type="secondary">自动写入每个账户的托管 API Inbox，不需要手工填写</Text>
+                  </div>
                 </Form.Item>
               </div>
             </div>
@@ -13274,64 +13240,17 @@ export default function App() {
             <div className="message-service-section">
               <div className="message-service-section-heading">
                 <Text strong>安全凭据</Text>
-                <Text type="secondary">凭据在服务端加密存储，留空不会覆盖已有值</Text>
+                <Text type="secondary">令牌在服务端加密存储，留空保留已有值</Text>
               </div>
               <div className="chatwoot-config-grid message-service-fields">
-                <Form.Item
-                  name="webhook_secret"
-                  label="Webhook 秘密"
-                  rules={[
-                    {
-                      validator: (_, value) =>
-                        value
-                          ? Promise.resolve()
-                          : Promise.reject(new Error("请输入 Webhook 秘密"))
-                    }
-                  ]}
-                >
-                  <Input.Password autoComplete="new-password" />
-                </Form.Item>
-                <div className="message-service-credential">
-                  <Form.Item
-                    name="client_hmac_token"
-                    label="客户端身份 HMAC Token"
-                    extra="仅在 Chatwoot API Inbox 启用身份验证时填写"
-                  >
-                    <Input.Password autoComplete="new-password" />
-                  </Form.Item>
-                  {chatwootConfig?.has_client_hmac_token ? (
-                    <div className="message-service-clear-control">
-                      <Text type="secondary">保存时清除现有 HMAC Token</Text>
-                      <Form.Item
-                        name="clear_client_hmac_token"
-                        valuePropName="checked"
-                        noStyle
-                      >
-                        <Switch size="small" />
-                      </Form.Item>
-                    </div>
-                  ) : null}
-                </div>
                 <div className="message-service-credential chatwoot-config-span-2">
                   <Form.Item
                     name="api_access_token"
                     label="专用服务账号令牌"
-                    extra="账号标签、手机端账号分组、在线状态及自动创建账号 Inbox 必填"
+                    extra="从 Chatwoot 个人资料页复制 Access Token；账号必须具有 administrator 权限。首次配置必填，后续留空保留。"
                   >
                     <Input.Password autoComplete="new-password" />
                   </Form.Item>
-                  {chatwootConfig?.has_api_access_token ? (
-                    <div className="message-service-clear-control">
-                      <Text type="secondary">保存时清除现有服务账号令牌</Text>
-                      <Form.Item
-                        name="clear_api_access_token"
-                        valuePropName="checked"
-                        noStyle
-                      >
-                        <Switch size="small" />
-                      </Form.Item>
-                    </div>
-                  ) : null}
                 </div>
               </div>
             </div>
@@ -13388,9 +13307,13 @@ export default function App() {
         </Card>
         {chatwootConfig?.last_error ? (
           <Alert
-            type="error"
+            type={chatwootConfig.status === "degraded" ? "warning" : "error"}
             showIcon
-            message="最近一次同步失败"
+            message={
+              chatwootConfig.status === "degraded"
+                ? "最近一次同步部分异常"
+                : "最近一次同步失败"
+            }
             description={chatwootConfig.last_error}
           />
         ) : null}

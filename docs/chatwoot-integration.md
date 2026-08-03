@@ -4,8 +4,9 @@
 平台账户页的 `Chat` 开关控制；客户、会话和消息 ID 按“平台 + 平台账户”独立
 映射，不会跨平台或跨账户复用。
 
-未配置专用服务账号令牌时，既有 API Inbox 作为兼容入口继续使用。配置管理员服务
-账号令牌后，系统会为每个开启 `Chat` 的平台账户创建独立的 API Inbox（例如
+系统只支持管理员服务账号托管模式。保存 Chatwoot 地址和管理员服务账号令牌后，
+系统会自动识别 Chatwoot 账户 ID，并为每个开启 `Chat` 的平台账户创建独立的
+API Inbox（例如
 `🟢 [闲鱼] 账号名称`），并附加稳定的账号标签和自定义属性。Chatwoot 联系人标题
 使用 `平台｜真实完整账号名称`，买家入站消息使用 `买家名称：原始消息`；因此官方
 手机端的标题、消息预览和推送通知可以同时辨识平台账号与客户。
@@ -13,14 +14,12 @@
 ## 配置项
 
 - Chatwoot 地址：Chatwoot 实例根地址，例如 `http://chatwoot.example:3000`
-- 收件箱标识符：API Inbox 的 identifier
-- Webhook 地址：Chatwoot 回调本系统时使用的完整地址，可按反向代理入口修改
-- Webhook 秘密：API Inbox 生成的签名密钥
-- 客户端身份 HMAC Token：可选，仅在 API Inbox 开启身份验证时填写
-- Chatwoot 平台账户 ID：账号分组、标签和状态回写必填；收到通过验证的 Webhook
-  后可自动识别
-- 专用服务账号令牌：账号分组、标签、自定义属性和状态回写必填，需使用具备
-  Chatwoot 管理员权限的专用服务账号令牌
+- 专用服务账号令牌：从 Chatwoot 个人资料页复制 Access Token；账号必须具有
+  `administrator` 权限。首次配置必填，后续留空会保留已加密存储的令牌
+- Chatwoot 平台账户 ID：保存时通过 `/api/v1/profile` 自动识别，只读展示
+- Webhook 地址：由 `XIANYU_PUBLIC_BASE_URL` 和固定回调路径自动生成，只读展示
+- Inbox identifier 和 Webhook 签名秘密：创建/读取每个账户的官方 API Inbox 时
+  自动获取并按账户加密保存，不在平台配置页手工填写
 - 账户状态提醒：平台级总开关；Cookie 确认失效立即发送，IM 普通掉线按配置的
   延迟时间再次确认后发送
 
@@ -28,9 +27,9 @@
 `api-access-token` 请求头。Rack/Chatwoot 会将其识别为官方文档中的
 `api_access_token`；这样无需在反向代理额外开启 `underscores_in_headers`。
 
-保存后复制页面中的 Webhook 地址，填入 Chatwoot API Inbox 的 Webhook URL。
-该地址可直接编辑并持久化，但必须指向本项目的回调端点，不能填写 Chatwoot 自己的
-根地址。
+系统会把生成的 Webhook 地址自动写入每个托管 API Inbox，并固定关闭客户端身份
+HMAC 校验（`hmac_mandatory=false`）。平台不接收手工 Webhook Secret、客户端
+HMAC Token、Inbox identifier、回调地址或 Chatwoot 账户 ID。
 
 内网 HTTPS 部署应配置 `XIANYU_PUBLIC_BASE_URL`，使管理 API 返回稳定的完整
 Webhook 地址，不依赖管理员当前浏览器访问的端口。若 Chatwoot 和本项目使用内部
@@ -86,8 +85,8 @@ Webhook 使用 Chatwoot 的 `X-Chatwoot-Timestamp`、`X-Chatwoot-Signature` 和
 账号标签只追加系统管理的标签，不会覆盖客服手工添加的标签。账号重命名时，联系人
 标题、独立 Inbox 名称和账号标签会由后台任务幂等更新。买家真实名称同时保存在
 联系人自定义属性中，不参与联系人标题截断。开启账号专属 Inbox 后，
-旧共享 Inbox 中已有本地映射的会话会在专属 Inbox 中幂等重建映射，旧会话标记为
-resolved 并保留历史记录；后续新消息只进入专属 Inbox，不再回退到旧共享 Inbox。
+本地已有映射若指向其他 Inbox，会在当前账户的托管 Inbox 中幂等重建；后续新消息
+只进入托管 Inbox，不存在全局共享 Inbox 回退路径。
 
 系统启动时及每 15 分钟执行一次对账，修复遗漏的账号 Inbox、客户身份、会话映射和
 在线状态。新会话创建时会立即写入平台、平台账号、客户、原始会话和账号当前在线
@@ -102,7 +101,8 @@ Webhook 载荷中的 `unread_count` 和 `agent_last_seen_at` 快速判断，再�
 创建独立 Inbox 后，系统会确保用于集成的 Chatwoot 管理员账号已加入该 Inbox，
 并将新会话明确分配给该账号，保证其可在官方手机端默认的“我的会话”中看到。如果
 Chatwoot 标签接口异常，系统会将配置标记为降级，但不会回滚或阻断 Inbox 分组、
-消息和自定义属性链路。
+消息和自定义属性链路。管理页会以黄色“部分同步异常”显示这种降级，
+并保留 Chatwoot 返回的 HTTP 状态和错误摘要，不再将其表述为整体同步失败。
 
 图片下载限制为 10 MB。系统使用 `XIANYU_CHATWOOT_CA_BUNDLE` 校验所配置
 Chatwoot 主机的 HTTPS 证书，并为 ActiveStorage 手动处理最多三次重定向。每一跳
@@ -116,13 +116,12 @@ Chatwoot 是否原生播放取决于其版本和访问浏览器。本项目管�
 浏览器端 AMR 解码器播放语音，并通过鉴权接口读取原始文件，不向浏览器暴露闲鱼
 媒体地址。
 
-出站语音拦截提示和撤回提示都依赖 Chatwoot 平台账户 ID 与专用服务账号令牌；
-缺少这两项时系统仍会阻止不受支持的语音发送，但无法在 Chatwoot 会话中追加私密
-提示。
+出站语音拦截提示和撤回提示依赖自动识别的 Chatwoot 账户 ID 与管理员服务账号
+令牌；配置保存前会验证这两项，不再提供缺少凭据的兼容运行模式。
 
 ## 凭据边界
 
-Webhook 秘密、客户端 HMAC Token 和服务账号令牌均使用服务端密钥派生密钥加密
-存储。平台管理员配置页面会通过受保护的管理 API 明文回填这些凭据，便于直接检查和
-修改。生产使用前应轮换曾经出现在聊天记录、日志或截图中的密钥，并为完整回写创建
-权限最小化的专用服务账号，不要复用日常个人账号令牌。
+每个托管 Inbox 的 Webhook 签名秘密和服务账号令牌均使用服务端密钥派生密钥加密
+存储。管理 API 只返回“服务账号令牌已配置”状态，不明文回填令牌或 Inbox 秘密。
+生产使用前应轮换曾经出现在聊天记录、日志或截图中的密钥，并使用独立管理员服务
+账号，不要复用日常个人账号令牌。

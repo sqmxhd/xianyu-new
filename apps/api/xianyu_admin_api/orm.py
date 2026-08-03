@@ -1765,7 +1765,7 @@ class ProductOperationItemORM(Base):
 
 
 class ChatwootConfigORM(Base):
-    """Platform-wide Chatwoot API inbox configuration."""
+    """Platform-wide Chatwoot managed-inbox configuration."""
 
     __tablename__ = "xianyu_chatwoot_config"
 
@@ -1782,12 +1782,7 @@ class ChatwootConfigORM(Base):
         Integer, nullable=False, default=120, server_default="120"
     )
     base_url: Mapped[str] = mapped_column(String(1000), nullable=False)
-    inbox_identifier: Mapped[str] = mapped_column(String(160), nullable=False)
-    chatwoot_inbox_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    callback_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     chatwoot_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    webhook_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
-    client_hmac_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="disabled", server_default="disabled"

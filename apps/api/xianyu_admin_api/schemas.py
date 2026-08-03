@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 
 class BaseModel(PydanticBaseModel):
@@ -2061,14 +2061,7 @@ class ChatwootConfigPayload(BaseModel):
     account_alerts_enabled: bool = True
     offline_alert_delay_seconds: int = 120
     base_url: str
-    inbox_identifier: str
-    chatwoot_inbox_id: int | None = None
-    webhook_secret: str
-    client_hmac_token: str | None = None
-    api_access_token: str | None = None
     chatwoot_account_id: int | None = None
-    has_webhook_secret: bool = False
-    has_client_hmac_token: bool = False
     has_api_access_token: bool = False
     full_outbound_sync_enabled: bool = False
     account_grouping_enabled: bool = False
@@ -2084,25 +2077,16 @@ class ChatwootConfigPayload(BaseModel):
 
 
 class ChatwootConfigUpdatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = False
     account_alerts_enabled: bool = True
     offline_alert_delay_seconds: int = Field(default=120, ge=30, le=3600)
     base_url: str = Field(min_length=8, max_length=1000)
-    inbox_identifier: str = Field(min_length=8, max_length=160)
-    callback_url: str | None = Field(default=None, min_length=8, max_length=1000)
-    webhook_secret: str | None = Field(default=None, min_length=12, max_length=500)
-    client_hmac_token: str | None = Field(default=None, min_length=12, max_length=1000)
-    clear_client_hmac_token: bool = False
-    chatwoot_account_id: int | None = Field(default=None, ge=1)
     api_access_token: str | None = Field(default=None, min_length=12, max_length=1000)
-    clear_api_access_token: bool = False
 
     @field_validator(
         "base_url",
-        "inbox_identifier",
-        "callback_url",
-        "webhook_secret",
-        "client_hmac_token",
         "api_access_token",
         mode="before",
     )
@@ -2117,8 +2101,6 @@ class ChatwootConfigUpdatePayload(BaseModel):
     def validate_chatwoot_url(self) -> "ChatwootConfigUpdatePayload":
         if not self.base_url.startswith(("http://", "https://")):
             raise ValueError("Chatwoot 地址必须以 http:// 或 https:// 开头")
-        if self.callback_url and not self.callback_url.startswith(("http://", "https://")):
-            raise ValueError("Webhook 地址必须以 http:// 或 https:// 开头")
         self.base_url = self.base_url.rstrip("/")
         return self
 

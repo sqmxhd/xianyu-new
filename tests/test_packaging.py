@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,12 +245,116 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("99991231235959Z", deploy)
         self.assertIn("CHATWOOT_HTTPS_PORT", deploy)
         self.assertIn("现有数据、配置、证书和密钥不会被修改", deploy)
+        self.assertIn("LC_ALL=C sort -V -r", deploy)
+        self.assertIn("（最新/推荐）", deploy)
+        self.assertIn("org.opencontainers.image.version", deploy)
+        self.assertIn("XIANYU_IMAGE_ID", deploy)
+        self.assertIn("--no-deps --force-recreate xianyu-app", deploy)
+        self.assertIn("verify_running_app_release", deploy)
+        self.assertIn("rollback_upgrade_on_exit", deploy)
+        self.assertIn("应用容器仍在使用旧镜像", deploy)
         self.assertFalse(
             (root / "tools" / "package" / "assemble_offline_bundle.sh").exists()
         )
         self.assertFalse(
             (root / "tools" / "package" / "BundleImage.Dockerfile").exists()
         )
+
+    def test_deployment_upgrade_defaults_to_latest_version_package(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            deploy_root = Path(temporary)
+            script = deploy_root / "开始部署.sh"
+            shutil.copy2(root / "开始部署.sh", script)
+            (deploy_root / "compose.all.yml").write_text("name: xianyu\n", encoding="utf-8")
+            state = deploy_root / "XIANYU_DATA" / "state"
+            for version in ("1.0.20", "1.0.21"):
+                package = deploy_root / (
+                    f"xianyu-admin-{version}-linux-amd64.docker.tar.gz"
+                )
+                with gzip.open(package, "wb") as archive:
+                    archive.write(version.encode("ascii"))
+                digest = hashlib.sha256(package.read_bytes()).hexdigest()
+                (Path(f"{package}.sha256")).write_text(
+                    f"{digest}  {package.name}\n",
+                    encoding="utf-8",
+                )
+            fake_bin = deploy_root / "fake-bin"
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text(
+                """#!/bin/sh
+last=''
+for argument in \"$@\"; do last=\"$argument\"; done
+case \"$1:$2\" in
+  compose:version) exit 0 ;;
+  load:) cat >/dev/null; printf 'Loaded image\\n'; exit 0 ;;
+  tag:*) exit 0 ;;
+  image:rm) exit 0 ;;
+  image:inspect)
+    case \"$*\" in
+      *Architecture*) printf 'amd64\\n' ;;
+      *org.opencontainers.image.version*) printf '%s\\n' \"${last##*:}\" ;;
+      *org.opencontainers.image.revision*) printf 'test-revision\\n' ;;
+      *'{{.Id}}'*)
+        case \"$last\" in *1.0.20) printf 'sha256:old\\n' ;; *) printf 'sha256:new\\n' ;; esac
+        ;;
+    esac
+    exit 0
+    ;;
+  container:inspect)
+    case \"$*\" in
+      *State.Health*) printf 'healthy\\n' ;;
+      *'{{.Image}}'*) printf 'sha256:new\\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 1
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            script_text = script.read_text(encoding="utf-8")
+            function_block = "info() {" + script_text.split("info() {", 1)[1]
+            function_block = function_block.split('\ncase "${1:-}"', 1)[0]
+            definitions = (
+                "set -Eeuo pipefail\n"
+                'SCRIPT_DIR="$PWD"\n'
+                'DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"\n'
+                'COMPOSE_FILE="$SCRIPT_DIR/compose.all.yml"\n'
+                'PACKAGE_GLOB="xianyu-admin-*-linux-amd64.docker.tar.gz"\n'
+                'COMPOSE_PROJECT_NAME="xianyu"\n'
+                'UPGRADE_ROLLBACK_ACTIVE=false\n'
+                'UPGRADE_BACKUP_RELEASE=""\n'
+                'UPGRADE_BACKUP_IMAGE=""\n'
+                'UPGRADE_PREVIOUS_IMAGE=""\n'
+                f"{function_block}"
+            )
+            harness = (
+                f"{definitions}\n"
+                "list_packages\n"
+                'package="$(list_packages | head -n 1)"\n'
+                'import_package "$package" true\n'
+                "verify_running_app_release\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                cwd=deploy_root,
+                env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, output)
+            self.assertLess(
+                output.index("1.0.21"),
+                output.index("1.0.20"),
+            )
+            current = (state / "current-release.env").read_text(encoding="utf-8")
+            self.assertIn("RELEASE_VERSION=1.0.21", current)
+            self.assertIn("XIANYU_IMAGE_ID=sha256:new", current)
 
     def test_postgresql_runtime_is_packaged_for_the_shared_database(self) -> None:
         root = Path(__file__).resolve().parents[1]

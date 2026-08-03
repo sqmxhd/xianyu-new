@@ -25,7 +25,6 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
-from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
@@ -370,23 +369,6 @@ def _extract_chatwoot_message_id(payload: dict[str, Any]) -> str | None:
     return _remote_id(_event_message(payload).get("id"))
 
 
-def _extract_inbox_identifier(payload: dict[str, Any]) -> str | None:
-    candidates = (
-        payload.get("inbox"),
-        _event_message(payload).get("inbox"),
-        _event_conversation(payload).get("inbox"),
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        identifier = _remote_id(
-            candidate.get("identifier") or candidate.get("inbox_identifier")
-        )
-        if identifier:
-            return identifier
-    return None
-
-
 def _extract_chatwoot_inbox_id(payload: dict[str, Any]) -> int | None:
     candidates: tuple[object, ...] = (
         payload.get("inbox_id"),
@@ -575,12 +557,11 @@ def _contact_identity_payload(
     platform: str = DEFAULT_PLATFORM,
     peer_user_id: str,
     peer_name: str,
-    client_hmac_token: str | None,
 ) -> dict[str, Any]:
     platform_key = _string(platform).lower() or DEFAULT_PLATFORM
     platform_name = _platform_name(platform_key)
     identifier = f"{platform_key}:{account_id}:{peer_user_id}"
-    payload: dict[str, Any] = {
+    return {
         "identifier": identifier,
         "name": _visible_contact_name(peer_name, account_name, platform_key),
         "custom_attributes": {
@@ -598,13 +579,6 @@ def _contact_identity_payload(
             "xianyu_peer_user_id": peer_user_id,
         },
     }
-    if client_hmac_token:
-        payload["identifier_hash"] = hmac.new(
-            client_hmac_token.encode(),
-            identifier.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-    return payload
 
 
 def _conversation_source_attributes(
@@ -991,17 +965,8 @@ class ChatwootRepository:
     async def get_config_payload(self) -> ChatwootConfigPayload | None:
         return await run_db_blocking(self._get_config_payload_sync)
 
-    async def get_config_secret(self, inbox_id: int | None = None) -> str | None:
+    async def get_config_secret(self, inbox_id: int) -> str | None:
         return await run_db_blocking(self._get_config_secret_sync, inbox_id)
-
-    async def remember_legacy_inbox_id(self, inbox_id: int) -> None:
-        await run_db_blocking(self._remember_legacy_inbox_id_sync, inbox_id)
-
-    async def remember_chatwoot_account_id(self, account_id: int) -> None:
-        await run_db_blocking(
-            self._remember_chatwoot_account_id_sync,
-            account_id,
-        )
 
     async def get_inbox_binding(
         self,
@@ -1087,8 +1052,14 @@ class ChatwootRepository:
     async def upsert_config(
         self,
         payload: ChatwootConfigUpdatePayload,
+        *,
+        chatwoot_account_id: int,
     ) -> ChatwootConfigPayload:
-        return await run_db_blocking(self._upsert_config_sync, payload)
+        return await run_db_blocking(
+            self._upsert_config_sync,
+            payload,
+            chatwoot_account_id,
+        )
 
     async def record_webhook(
         self,
@@ -1324,8 +1295,6 @@ class ChatwootRepository:
         *,
         managed_inbox_count: int = 0,
     ) -> ChatwootConfigPayload:
-        webhook_secret = decrypt_sensitive(row.webhook_secret_encrypted) or ""
-        client_hmac_token = decrypt_sensitive(row.client_hmac_token_encrypted)
         api_access_token = decrypt_sensitive(row.api_access_token_encrypted)
         has_token = bool(api_access_token)
         return ChatwootConfigPayload(
@@ -1334,14 +1303,7 @@ class ChatwootRepository:
             account_alerts_enabled=row.account_alerts_enabled,
             offline_alert_delay_seconds=row.offline_alert_delay_seconds,
             base_url=row.base_url,
-            inbox_identifier=row.inbox_identifier,
-            chatwoot_inbox_id=row.chatwoot_inbox_id,
-            webhook_secret=webhook_secret,
-            client_hmac_token=client_hmac_token,
-            api_access_token=api_access_token,
             chatwoot_account_id=row.chatwoot_account_id,
-            has_webhook_secret=bool(webhook_secret),
-            has_client_hmac_token=bool(client_hmac_token),
             has_api_access_token=has_token,
             full_outbound_sync_enabled=bool(has_token and row.chatwoot_account_id),
             account_grouping_enabled=bool(
@@ -1351,7 +1313,7 @@ class ChatwootRepository:
             ),
             managed_inbox_count=managed_inbox_count,
             callback_path=CHATWOOT_CALLBACK_PATH,
-            callback_url=row.callback_url or _chatwoot_callback_url(),
+            callback_url=_chatwoot_callback_url(),
             status=row.status,
             last_error=row.last_error,
             last_webhook_at=row.last_webhook_at,
@@ -1373,46 +1335,16 @@ class ChatwootRepository:
                 managed_inbox_count=managed_inbox_count,
             )
 
-    def _get_config_secret_sync(self, inbox_id: int | None) -> str | None:
+    def _get_config_secret_sync(self, inbox_id: int) -> str | None:
         with self._session_factory() as session:
-            row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
-            if row is None:
-                return None
-            if inbox_id is not None:
-                binding = session.scalar(
-                    select(ChatwootInboxBindingORM).where(
-                        ChatwootInboxBindingORM.chatwoot_inbox_id == inbox_id
-                    )
-                )
-                if binding is not None:
-                    return decrypt_sensitive(binding.webhook_secret_encrypted)
-                if row.chatwoot_inbox_id not in {None, inbox_id}:
-                    return None
-            return decrypt_sensitive(row.webhook_secret_encrypted)
-
-    def _remember_legacy_inbox_id_sync(self, inbox_id: int) -> None:
-        with self._session_factory() as session:
-            row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
-            if row is None or row.chatwoot_inbox_id is not None:
-                return
-            if session.scalar(
-                select(ChatwootInboxBindingORM.account_id).where(
+            binding = session.scalar(
+                select(ChatwootInboxBindingORM).where(
                     ChatwootInboxBindingORM.chatwoot_inbox_id == inbox_id
                 )
-            ):
-                return
-            row.chatwoot_inbox_id = inbox_id
-            row.updated_at = utcnow()
-            session.commit()
-
-    def _remember_chatwoot_account_id_sync(self, account_id: int) -> None:
-        with self._session_factory() as session:
-            row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
-            if row is None or row.chatwoot_account_id is not None:
-                return
-            row.chatwoot_account_id = account_id
-            row.updated_at = utcnow()
-            session.commit()
+            )
+            if binding is None:
+                return None
+            return decrypt_sensitive(binding.webhook_secret_encrypted)
 
     @staticmethod
     def _inbox_binding_dict(row: ChatwootInboxBindingORM) -> dict[str, Any]:
@@ -1572,30 +1504,13 @@ class ChatwootRepository:
                 "account_state": runtime.state if runtime else None,
                 "account_status_message": runtime.message if runtime else None,
                 "base_url": row.base_url.rstrip("/"),
-                "inbox_identifier": (
-                    binding.inbox_identifier if binding else row.inbox_identifier
-                ),
+                "inbox_identifier": binding.inbox_identifier if binding else None,
                 "chatwoot_inbox_id": (
-                    binding.chatwoot_inbox_id if binding else row.chatwoot_inbox_id
+                    binding.chatwoot_inbox_id if binding else None
                 ),
-                "legacy_inbox_identifier": row.inbox_identifier,
-                "legacy_chatwoot_inbox_id": row.chatwoot_inbox_id,
                 "chatwoot_account_id": row.chatwoot_account_id,
-                "webhook_secret": decrypt_sensitive(
-                    binding.webhook_secret_encrypted
-                    if binding
-                    else row.webhook_secret_encrypted
-                ),
-                "client_hmac_token": (
-                    None
-                    if binding
-                    else decrypt_sensitive(row.client_hmac_token_encrypted)
-                ),
-                "legacy_client_hmac_token": decrypt_sensitive(
-                    row.client_hmac_token_encrypted
-                ),
                 "api_access_token": decrypt_sensitive(row.api_access_token_encrypted),
-                "callback_url": row.callback_url or _chatwoot_callback_url(),
+                "callback_url": _chatwoot_callback_url(),
                 "managed_inbox": binding is not None,
                 "label_id": binding.label_id if binding else None,
                 "label_title": binding.label_title if binding else None,
@@ -1611,43 +1526,28 @@ class ChatwootRepository:
     def _upsert_config_sync(
         self,
         payload: ChatwootConfigUpdatePayload,
+        chatwoot_account_id: int,
     ) -> ChatwootConfigPayload:
         with self._session_factory() as session:
             row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
             if row is None:
-                if not payload.webhook_secret:
-                    raise ValueError("首次配置必须填写 Webhook 秘密")
+                if not payload.api_access_token:
+                    raise ValueError("首次配置必须填写 Chatwoot 专用服务账号令牌")
                 row = ChatwootConfigORM(
                     config_id=CHATWOOT_CONFIG_ID,
-                    webhook_secret_encrypted=encrypt_sensitive(payload.webhook_secret) or "",
                     base_url=payload.base_url,
-                    inbox_identifier=payload.inbox_identifier,
+                    api_access_token_encrypted=encrypt_sensitive(
+                        payload.api_access_token
+                    ),
                     created_at=utcnow(),
                 )
                 session.add(row)
-            elif row.inbox_identifier != payload.inbox_identifier:
-                session.execute(sql_delete(ChatwootMessageORM))
-                session.execute(sql_delete(ChatwootConversationORM))
-                session.execute(sql_delete(ChatwootContactORM))
-                row.chatwoot_inbox_id = None
             row.enabled = payload.enabled
             row.account_alerts_enabled = payload.account_alerts_enabled
             row.offline_alert_delay_seconds = payload.offline_alert_delay_seconds
             row.base_url = payload.base_url
-            row.inbox_identifier = payload.inbox_identifier
-            row.callback_url = payload.callback_url or _chatwoot_callback_url()
-            row.chatwoot_account_id = payload.chatwoot_account_id
-            if payload.webhook_secret:
-                row.webhook_secret_encrypted = encrypt_sensitive(payload.webhook_secret) or ""
-            if payload.clear_client_hmac_token:
-                row.client_hmac_token_encrypted = None
-            elif payload.client_hmac_token:
-                row.client_hmac_token_encrypted = encrypt_sensitive(
-                    payload.client_hmac_token
-                )
-            if payload.clear_api_access_token:
-                row.api_access_token_encrypted = None
-            elif payload.api_access_token:
+            row.chatwoot_account_id = chatwoot_account_id
+            if payload.api_access_token:
                 row.api_access_token_encrypted = encrypt_sensitive(payload.api_access_token)
             row.status = "ready" if payload.enabled else "disabled"
             row.last_error = None
@@ -2303,6 +2203,8 @@ async def accept_chatwoot_webhook(
     if not isinstance(parsed, dict):
         raise ChatwootIntegrationError("Webhook 数据必须是 JSON 对象")
     inbox_id = _extract_chatwoot_inbox_id(parsed)
+    if inbox_id is None:
+        raise PermissionError("Chatwoot webhook is missing a managed inbox id")
     secret = await repository.get_config_secret(inbox_id)
     if not secret:
         raise PermissionError("Chatwoot inbox is not managed by this integration")
@@ -2313,11 +2215,7 @@ async def accept_chatwoot_webhook(
         timestamp=timestamp,
     ):
         raise PermissionError("invalid Chatwoot webhook signature")
-    if inbox_id is not None:
-        await repository.remember_legacy_inbox_id(inbox_id)
     payload_account_id = _extract_chatwoot_account_id(parsed)
-    if payload_account_id is not None:
-        await repository.remember_chatwoot_account_id(payload_account_id)
     config = await repository.get_config()
     if config is None:
         raise PermissionError("Chatwoot config not found")
@@ -2326,13 +2224,6 @@ async def accept_chatwoot_webhook(
         and config.get("chatwoot_account_id") != payload_account_id
     ):
         raise PermissionError("Chatwoot account does not match config")
-    payload_inbox_identifier = _extract_inbox_identifier(parsed)
-    if (
-        inbox_id is None
-        and payload_inbox_identifier
-        and payload_inbox_identifier != config["inbox_identifier"]
-    ):
-        raise PermissionError("Chatwoot inbox identifier does not match config")
     digest = hashlib.sha256(raw_body).hexdigest()
     delivery_id = _string(delivery_header) or f"fallback-{digest}"
     event_name = _string(parsed.get("event")) or "unknown"
@@ -2683,25 +2574,20 @@ async def test_chatwoot_config(
     if config is None:
         return ChatwootTestResultPayload(success=False, message="配置不存在")
     try:
-        status_code, _ = await run_external_blocking(
+        token = _string(config.get("api_access_token"))
+        if not token:
+            raise ChatwootIntegrationError("Chatwoot 专用服务账号令牌未配置")
+        status_code, profile_body = await run_external_blocking(
             _chatwoot_request,
             "GET",
-            (
-                f"{config['base_url']}/public/api/v1/inboxes/"
-                f"{config['inbox_identifier']}"
-            ),
+            f"{config['base_url']}/api/v1/profile",
+            token=token,
             timeout=10,
         )
-        if config["api_access_token"] and config["chatwoot_account_id"]:
-            await run_external_blocking(
-                _chatwoot_request,
-                "GET",
-                (
-                    f"{config['base_url']}/api/v1/accounts/"
-                    f"{config['chatwoot_account_id']}"
-                ),
-                token=config["api_access_token"],
-                timeout=10,
+        detected_account_id = _administrator_account_id(profile_body)
+        if detected_account_id != config.get("chatwoot_account_id"):
+            raise ChatwootIntegrationError(
+                "Chatwoot 服务账号所属账户已变化，请重新保存配置"
             )
     except Exception as exc:
         await repository.set_config_health(
@@ -2712,12 +2598,53 @@ async def test_chatwoot_config(
     await repository.set_config_health(status="ready", error=None)
     return ChatwootTestResultPayload(
         success=True,
-        message=(
-            "Chatwoot 连接正常"
-            if config["api_access_token"] and config["chatwoot_account_id"]
-            else "Chatwoot 基础连接正常；账号分组、标签和状态回写仍需平台账户 ID 与专用服务账号令牌"
-        ),
+        message="Chatwoot 管理员服务账号连接正常",
         status_code=status_code,
+    )
+
+
+def _administrator_account_id(profile_payload: object) -> int:
+    profile = _json_object(profile_payload)
+    accounts = profile.get("accounts")
+    administrators: list[int] = []
+    if isinstance(accounts, list):
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            role = _string(account.get("role")).lower()
+            account_id = int(account.get("id") or 0)
+            if role == "administrator" and account_id > 0:
+                administrators.append(account_id)
+    if not administrators:
+        raise ChatwootIntegrationError(
+            "专用服务账号必须在 Chatwoot 中具有 administrator 权限"
+        )
+    return administrators[0]
+
+
+async def save_chatwoot_config(
+    repository: ChatwootRepository,
+    payload: ChatwootConfigUpdatePayload,
+) -> ChatwootConfigPayload:
+    """Validate the service account and persist only server-owned metadata."""
+
+    existing = await repository.get_config()
+    token = _string(payload.api_access_token)
+    if not token and existing is not None:
+        token = _string(existing.get("api_access_token"))
+    if not token:
+        raise ChatwootIntegrationError("首次配置必须填写 Chatwoot 专用服务账号令牌")
+    _, profile_body = await run_external_blocking(
+        _chatwoot_request,
+        "GET",
+        f"{payload.base_url}/api/v1/profile",
+        token=token,
+        timeout=10,
+    )
+    chatwoot_account_id = _administrator_account_id(profile_body)
+    return await repository.upsert_config(
+        payload,
+        chatwoot_account_id=chatwoot_account_id,
     )
 
 
@@ -2800,16 +2727,13 @@ async def _ensure_account_label(
         )
         labels = _json_object(body).get("payload") or []
     except ChatwootIntegrationError as exc:
-        # Some self-hosted Chatwoot versions return 500 from the collection
-        # endpoint while create/update and conversation-label APIs still work.
-        # A persisted label ID remains authoritative; for the initial creation
-        # continue with an empty collection instead of blocking Inbox grouping.
+        # A persisted label ID remains authoritative when listing temporarily
+        # fails. Without a binding, do not create blindly because that could
+        # duplicate an existing remote label after a transient API failure.
         logger.warning("Chatwoot label listing failed; using local binding: %s", exc)
-        labels = (
-            [{"id": label_id, "title": binding.get("label_title")}]
-            if binding and label_id is not None
-            else []
-        )
+        if not binding or label_id is None:
+            raise
+        labels = [{"id": label_id, "title": binding.get("label_title")}]
     matched: dict[str, Any] | None = None
     for item in labels:
         if not isinstance(item, dict):
@@ -2835,7 +2759,7 @@ async def _ensure_account_label(
             "POST",
             labels_url,
             token=token,
-            json_body=label_payload,
+            json_body={"label": label_payload},
         )
         matched = _json_object(created_body)
         if isinstance(matched.get("payload"), dict):
@@ -2846,7 +2770,7 @@ async def _ensure_account_label(
             "PATCH",
             f"{labels_url}/{matched['id']}",
             token=token,
-            json_body=label_payload,
+            json_body={"label": label_payload},
         )
     resolved_id = int(matched.get("id") or 0)
     if resolved_id <= 0:
@@ -2926,49 +2850,10 @@ async def _ensure_managed_account_inbox(
         account_name=account_name,
         state=state_override or config.get("account_state"),
     )
-    if config.get("managed_inbox"):
-        if refresh_display_name and token and chatwoot_account_id:
-            await run_external_blocking(
-                _chatwoot_request,
-                "PATCH",
-                (
-                    f"{config['base_url']}/api/v1/accounts/"
-                    f"{chatwoot_account_id}/inboxes/"
-                    f"{config['chatwoot_inbox_id']}"
-                ),
-                token=token,
-                json_body={
-                    "name": desired_name,
-                    "lock_to_single_conversation": (
-                        CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
-                    ),
-                },
-            )
-        config = dict(config)
-        config["member_added"] = await _ensure_inbox_membership(config)
-        try:
-            label_id, label_title = await _ensure_account_label(
-                repository,
-                config,
-            )
-        except ChatwootIntegrationError as exc:
-            config = dict(config)
-            config["label_error"] = str(exc)[:1000]
-            logger.warning(
-                "Chatwoot account label unavailable; Inbox grouping remains active: %s",
-                exc,
-            )
-        else:
-            if (
-                config.get("label_id") != label_id
-                or config.get("label_title") != label_title
-            ):
-                config = dict(config)
-                config["label_id"] = label_id
-                config["label_title"] = label_title
-        return config
     if not token or not chatwoot_account_id:
-        return config
+        raise ChatwootIntegrationError(
+            "自动创建账号 Inbox 需要有效的 Chatwoot 管理员服务账号令牌"
+        )
     inboxes_url = (
         f"{config['base_url']}/api/v1/accounts/{chatwoot_account_id}/inboxes"
     )
@@ -2987,7 +2872,14 @@ async def _ensure_managed_account_inbox(
             attributes = _json_object(item.get("additional_attributes"))
             if (
                 _string(item.get("channel_type")) == "Channel::Api"
-                and _string(attributes.get("xianyu_account_id")) == account_id
+                and (
+                    _string(attributes.get("xianyu_account_id")) == account_id
+                    or (
+                        bool(config.get("managed_inbox"))
+                        and int(item.get("id") or 0)
+                        == int(config.get("chatwoot_inbox_id") or 0)
+                    )
+                )
             ):
                 remote = item
                 break
@@ -3021,24 +2913,31 @@ async def _ensure_managed_account_inbox(
     remote_id = int(remote.get("id") or 0)
     if remote_id <= 0:
         raise ChatwootIntegrationError("Chatwoot 创建账号 Inbox 后未返回 Inbox ID")
-    if (
-        _string(remote.get("name")) != desired_name
-        or "lock_to_single_conversation" not in remote
-        or bool(remote.get("lock_to_single_conversation"))
-        != CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
-    ):
-        await run_external_blocking(
-            _chatwoot_request,
-            "PATCH",
-            f"{inboxes_url}/{remote_id}",
-            token=token,
-            json_body={
-                "name": desired_name,
-                "lock_to_single_conversation": (
-                    CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
-                ),
+    additional_attributes = {
+        **_json_object(remote.get("additional_attributes")),
+        "source_platform": platform,
+        "source_platform_name": platform_name,
+        "xianyu_account_id": account_id,
+        "xianyu_account_name": account_name,
+        "managed_by": "xianyu-admin",
+    }
+    await run_external_blocking(
+        _chatwoot_request,
+        "PATCH",
+        f"{inboxes_url}/{remote_id}",
+        token=token,
+        json_body={
+            "name": desired_name,
+            "lock_to_single_conversation": (
+                CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION
+            ),
+            "channel": {
+                "webhook_url": config["callback_url"],
+                "hmac_mandatory": False,
+                "additional_attributes": additional_attributes,
             },
-        )
+        },
+    )
     if (
         not remote.get("inbox_identifier")
         or not remote.get("secret")
@@ -3092,7 +2991,6 @@ async def _update_remote_contact_identity(
     source_id: str,
     peer_user_id: str,
     peer_name: str,
-    legacy_inbox: bool,
 ) -> None:
     account_id = _string(config.get("account_id"))
     account_name = _string(config.get("account_name")) or account_id[:8]
@@ -3102,11 +3000,6 @@ async def _update_remote_contact_identity(
         platform=_string(config.get("platform")).lower() or DEFAULT_PLATFORM,
         peer_user_id=peer_user_id,
         peer_name=peer_name,
-        client_hmac_token=(
-            _string(config.get("legacy_client_hmac_token")) or None
-            if legacy_inbox
-            else None
-        ),
     )
     await run_external_blocking(
         _chatwoot_request,
@@ -3237,7 +3130,6 @@ async def _ensure_remote_conversation(
         or DEFAULT_PLATFORM,
         peer_user_id=context["peer_user_id"],
         peer_name=context.get("peer_name") or context["peer_user_id"],
-        client_hmac_token=config.get("client_hmac_token"),
     )
     contact_payload.update({
         "source_id": source_id,
@@ -3287,7 +3179,6 @@ async def _ensure_remote_conversation(
         source_id=source_id,
         peer_user_id=context["peer_user_id"],
         peer_name=context.get("peer_name") or context["peer_user_id"],
-        legacy_inbox=not bool(config.get("managed_inbox")),
     )
     conversation_url = (
         f"{config['base_url']}/public/api/v1/inboxes/{config['inbox_identifier']}"
@@ -4536,7 +4427,8 @@ async def execute_account_status_task(
     await repository.set_config_health(
         status="degraded" if config.get("label_error") else "ready",
         error=(
-            "账号 Inbox 与状态属性已同步；Chatwoot 标签接口异常，标签暂未同步"
+            "账号 Inbox 与状态属性已同步；Chatwoot 标签接口异常，标签暂未同步："
+            f"{_string(config.get('label_error'))[:300]}"
             if config.get("label_error")
             else None
         ),
@@ -4873,17 +4765,12 @@ async def execute_account_metadata_task(
                     f"{str(exc)[:300]}"
                 )
                 continue
-        inbox_identifier = _string(mapping.get("inbox_identifier")) or _string(
-            config.get("legacy_inbox_identifier")
-        )
+        inbox_identifier = _string(mapping.get("inbox_identifier"))
         if not inbox_identifier:
             errors.append(
                 f"会话 {mapping['chatwoot_conversation_id']} 缺少 Inbox 标识符"
             )
             continue
-        legacy_inbox = (
-            inbox_identifier == _string(config.get("legacy_inbox_identifier"))
-        )
         try:
             await _update_remote_contact_identity(
                 config,
@@ -4892,7 +4779,6 @@ async def execute_account_metadata_task(
                 peer_user_id=mapping["peer_user_id"],
                 peer_name=_string(mapping.get("peer_name"))
                 or mapping["peer_user_id"],
-                legacy_inbox=legacy_inbox,
             )
             contact_updates += 1
             if token_ready and config.get("managed_inbox"):
@@ -4929,7 +4815,8 @@ async def execute_account_metadata_task(
         await repository.set_config_health(
             status="degraded" if config.get("label_error") else "ready",
             error=(
-                "账号 Inbox 与自定义属性已同步；Chatwoot 标签接口异常，标签暂未同步"
+                "账号 Inbox 与自定义属性已同步；Chatwoot 标签接口异常，标签暂未同步："
+                f"{_string(config.get('label_error'))[:300]}"
                 if config.get("label_error")
                 else None
             ),
