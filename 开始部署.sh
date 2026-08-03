@@ -408,37 +408,101 @@ import_package() {
   fi
 }
 
+dependency_archive_filename() {
+  case "$1" in
+    pgvector/pgvector:pg16)
+      printf '%s\n' 'pgvector-pg16-linux-amd64.docker.tar.gz'
+      ;;
+    redis:7.4-alpine)
+      printf '%s\n' 'redis-7.4-alpine-linux-amd64.docker.tar.gz'
+      ;;
+    chatwoot/chatwoot:v4.16.0)
+      printf '%s\n' 'chatwoot-v4.16.0-linux-amd64.docker.tar.gz'
+      ;;
+    *)
+      printf '%s-linux-amd64.docker.tar.gz\n' \
+        "$(printf '%s' "$1" | tr '/:' '--')"
+      ;;
+  esac
+}
+
+dependency_registry_address() {
+  case "$1" in
+    */*) printf 'docker.io/%s\n' "$1" ;;
+    *) printf 'docker.io/library/%s\n' "$1" ;;
+  esac
+}
+
 select_dependency_archive() {
-  local label="$1" hint="$2" files=() file choice index
+  local label="$1" hint="$2" source_image="$3"
+  local files=() file choice index suggested registry size
   declare -A seen=()
-  shopt -s nullglob nocaseglob
-  for file in \
-    "$SCRIPT_DIR"/*"$hint"*.docker.tar.gz \
-    "$SCRIPT_DIR"/*"$hint"*.tar.gz \
-    "$SCRIPT_DIR"/*"$hint"*.docker.tar \
-    "$SCRIPT_DIR"/*"$hint"*.tar
-  do
-    if [ -f "$file" ] && [ -z "${seen[$file]:-}" ]; then
-      files+=("$file")
-      seen[$file]=1
+  suggested="$(dependency_archive_filename "$source_image")"
+  registry="$(dependency_registry_address "$source_image")"
+
+  while true; do
+    files=()
+    seen=()
+    shopt -s nullglob nocaseglob
+    for file in \
+      "$SCRIPT_DIR"/*"$hint"*.docker.tar.gz \
+      "$SCRIPT_DIR"/*"$hint"*.tar.gz \
+      "$SCRIPT_DIR"/*"$hint"*.docker.tgz \
+      "$SCRIPT_DIR"/*"$hint"*.tgz \
+      "$SCRIPT_DIR"/*"$hint"*.docker.tar \
+      "$SCRIPT_DIR"/*"$hint"*.tar
+    do
+      if [ -f "$file" ] && [ -z "${seen[$file]:-}" ]; then
+        files+=("$file")
+        seen[$file]=1
+      fi
+    done
+    shopt -u nullglob nocaseglob
+    if [ "${#files[@]}" -gt 1 ]; then
+      mapfile -d '' -t files < <(printf '%s\0' "${files[@]}" | LC_ALL=C sort -z -f)
     fi
-  done
-  shopt -u nullglob nocaseglob
-  printf '\n%s 本地镜像包：\n' "$label" >&2
-  for index in "${!files[@]}"; do
-    printf '  %d) %s\n' "$((index + 1))" "$(basename -- "${files[$index]}")" >&2
-  done
-  printf '  0) 手动输入文件路径\n' >&2
-  read -r -p '请选择: ' choice
-  if [ "${choice:-0}" = 0 ]; then
-    read -r -p "$label 镜像包路径: " file
-    [ -f "$file" ] || fail "文件不存在：$file"
-    printf '%s\n' "$file"
+
+    printf '\n%s 本地镜像包：\n' "$label" >&2
+    printf '  扫描目录：%s\n' "$SCRIPT_DIR" >&2
+    printf '  官方镜像：%s\n' "$registry" >&2
+    printf '  联网机器制作离线包：\n' >&2
+    printf '    docker pull --platform %s %s\n' "$TARGET_PLATFORM" "$source_image" >&2
+    printf '    docker save %s | gzip -1 > %s\n' "$source_image" "$suggested" >&2
+    printf '  将生成的文件上传到上述扫描目录，然后选择 R 刷新。\n\n' >&2
+    if [ "${#files[@]}" -eq 0 ]; then
+      printf '  未发现文件名包含“%s”的 .tar/.tar.gz/.tgz 镜像包。\n' "$hint" >&2
+    else
+      for index in "${!files[@]}"; do
+        size="$(du -h --apparent-size -- "${files[$index]}" 2>/dev/null | awk '{print $1}')"
+        printf '  %d) %s%s\n' \
+          "$((index + 1))" "$(basename -- "${files[$index]}")" \
+          "${size:+ （$size）}" >&2
+      done
+    fi
+    printf '  R) 重新扫描当前目录\n' >&2
+    printf '  0) 手动输入文件路径\n' >&2
+    read -r -p '请选择: ' choice
+    case "${choice:-}" in
+      r|R)
+        continue
+        ;;
+      0)
+        read -r -p "$label 镜像包路径: " file
+        [ -n "$file" ] || fail "镜像包路径不能为空"
+        case "$file" in
+          /*) ;;
+          *) file="$SCRIPT_DIR/$file" ;;
+        esac
+        [ -f "$file" ] || fail "文件不存在：$file"
+        printf '%s\n' "$(readlink -f -- "$file")"
+        return 0
+        ;;
+    esac
+    validate_port "$choice" || fail "选择无效"
+    [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ] || fail "选择无效"
+    printf '%s\n' "${files[$((choice - 1))]}"
     return 0
-  fi
-  validate_port "$choice" || fail "选择无效"
-  [ "$choice" -le "${#files[@]}" ] || fail "选择无效"
-  printf '%s\n' "${files[$((choice - 1))]}"
+  done
 }
 
 load_docker_archive() {
@@ -471,7 +535,7 @@ prepare_official_image() {
       sleep 3
     done
   else
-    archive="$(select_dependency_archive "$label" "$hint")"
+    archive="$(select_dependency_archive "$label" "$hint" "$source_image")"
     load_docker_archive "$archive"
   fi
   docker image inspect "$source_image" >/dev/null 2>&1 ||

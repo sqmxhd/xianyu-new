@@ -99,6 +99,19 @@ xianyu-local/redis:7.4-alpine
 xianyu-local/pgvector:pg16
 ```
 
+选择本地官方镜像包时，脚本只扫描 `开始部署.sh` 同级目录，不递归扫描
+`XIANYU_DATA` 或其他子目录。文件名需分别包含 `pgvector`、`redis`、`chatwoot`
+关键词（不区分大小写），支持 `.tar`、`.tar.gz`、`.tgz` 以及对应的
+`.docker.*` 后缀。选择菜单会显示扫描目录、官方镜像地址和联网机器制作离线包的
+完整命令；文件上传完成后输入 `R` 即可重新扫描，无需退出部署流程。手动输入的
+相对路径同样按脚本所在目录解析。推荐文件名为：
+
+```text
+pgvector-pg16-linux-amd64.docker.tar.gz
+redis-7.4-alpine-linux-amd64.docker.tar.gz
+chatwoot-v4.16.0-linux-amd64.docker.tar.gz
+```
+
 ## 本地化目录
 
 ```text

@@ -226,6 +226,14 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("复用本地镜像", deploy)
         self.assertIn("在线拉取官方镜像", deploy)
         self.assertIn("导入本地官方镜像包", deploy)
+        self.assertIn("R) 重新扫描当前目录", deploy)
+        self.assertIn("联网机器制作离线包", deploy)
+        self.assertIn("dependency_registry_address", deploy)
+        self.assertIn('"$SCRIPT_DIR"/*"$hint"*.docker.tgz', deploy)
+        self.assertIn('*) file="$SCRIPT_DIR/$file"', deploy)
+        self.assertIn("pgvector-pg16-linux-amd64.docker.tar.gz", deploy)
+        self.assertIn("redis-7.4-alpine-linux-amd64.docker.tar.gz", deploy)
+        self.assertIn("chatwoot-v4.16.0-linux-amd64.docker.tar.gz", deploy)
         self.assertIn("chatwoot/chatwoot:v4.16.0", deploy)
         self.assertNotIn("mysql:8.4", deploy)
         self.assertIn("redis:7.4-alpine", deploy)
@@ -320,6 +328,61 @@ exit 1
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.strip(), "linux/amd64")
+
+    def test_dependency_archive_menu_refreshes_and_resolves_relative_paths(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        deploy = (root / "开始部署.sh").read_text(encoding="utf-8")
+        sourceable_deploy = deploy.split('\ncase "${1:-}" in', 1)[0] + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            deploy_root = Path(temporary)
+            script = deploy_root / "deployment-functions.sh"
+            script.write_text(sourceable_deploy, encoding="utf-8")
+            archive = deploy_root / "PGVECTOR-pg16-linux-amd64.docker.tgz"
+            archive.write_bytes(b"offline image archive")
+            harness = deploy_root / "select-archive.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                'source "$1"\n'
+                'SCRIPT_DIR="$2"\n'
+                'select_dependency_archive "pgvector" "pgvector" '
+                '"pgvector/pgvector:pg16"\n',
+                encoding="utf-8",
+            )
+
+            refreshed = subprocess.run(
+                ["bash", str(harness), str(script), str(deploy_root)],
+                input="R\n1\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                refreshed.returncode,
+                0,
+                refreshed.stdout + refreshed.stderr,
+            )
+            self.assertEqual(refreshed.stdout.strip(), str(archive))
+            self.assertEqual(refreshed.stderr.count("重新扫描当前目录"), 2)
+            self.assertIn("docker.io/pgvector/pgvector:pg16", refreshed.stderr)
+            self.assertIn(
+                "docker pull --platform linux/amd64 pgvector/pgvector:pg16",
+                refreshed.stderr,
+            )
+            self.assertIn(
+                "pgvector-pg16-linux-amd64.docker.tar.gz",
+                refreshed.stderr,
+            )
+
+            manual = subprocess.run(
+                ["bash", str(harness), str(script), str(deploy_root)],
+                input=f"0\n{archive.name}\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(manual.returncode, 0, manual.stdout + manual.stderr)
+            self.assertEqual(manual.stdout.strip(), str(archive))
 
     def test_deployment_upgrade_defaults_to_latest_version_package(self) -> None:
         root = Path(__file__).resolve().parents[1]
