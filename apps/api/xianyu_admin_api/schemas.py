@@ -724,6 +724,42 @@ class AccountCookiePayload(BaseModel):
     cookie_updated_at: datetime | None = None
 
 
+class AccountMigrationPreviewPayload(BaseModel):
+    session_id: str
+    expires_at: datetime
+    exported_at: datetime
+    source_account_id: str
+    platform_user_id: str | None = None
+    platform_display_name: str | None = None
+    remark: str | None = None
+    cookie_present: bool
+    browser_identity: AccountBrowserIdentityPayload
+    browser_available: bool
+    profile_present: bool
+    profile_size_bytes: int = 0
+    profile_file_count: int = 0
+    proxy_included: bool = False
+    proxy_name: str | None = None
+    desired_enabled: bool = True
+    desired_chat_enabled: bool = False
+    conflicts: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    can_import: bool = True
+
+
+class AccountMigrationImportPayload(BaseModel):
+    session_id: str = Field(min_length=32, max_length=64)
+    import_proxy: bool = True
+    enable_after_import: bool = False
+    enable_chatwoot_after_import: bool = False
+
+    @model_validator(mode="after")
+    def validate_enablement(self) -> "AccountMigrationImportPayload":
+        if self.enable_chatwoot_after_import and not self.enable_after_import:
+            raise ValueError("启用 Chatwoot 前必须先启用导入账户")
+        return self
+
+
 class RuntimeStatusPayload(BaseModel):
     account_id: str
     state: RuntimeState = "stopped"

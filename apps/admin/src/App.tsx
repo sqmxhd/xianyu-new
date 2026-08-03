@@ -9,11 +9,13 @@ import {
   CloseOutlined,
   DeleteOutlined,
   DesktopOutlined,
+  DownloadOutlined,
   EditOutlined,
   EnvironmentOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
   FolderOpenOutlined,
+  FileZipOutlined,
   HistoryOutlined,
   HolderOutlined,
   InfoCircleOutlined,
@@ -141,6 +143,7 @@ import {
   deletePublishAddress,
   deletePublishAddressGroup,
   deleteProxy,
+  exportAccountMigration,
   checkDeliveryPreflight,
   getAIProviderSetting,
   getBrowserRuntimeSetting,
@@ -155,6 +158,8 @@ import {
   listAccountRuntimeEvents,
   listActiveAccountBrowserSessions,
   listAccounts,
+  inspectAccountMigration,
+  importAccountMigration,
   listAuditLogs,
   listAutoReplyLogs,
   listAutoReplyRuleIssues,
@@ -299,6 +304,7 @@ import type {
   AccountBrowserSession,
   AccountBrowserIdentity,
   AccountFormValues,
+  AccountMigrationPreview,
   AdminUser,
   AIProviderSetting,
   AIProviderSettingFormValues,
@@ -1739,6 +1745,22 @@ export default function App() {
   const [recoveringAccountId, setRecoveringAccountId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<Account | null>(null);
+  const [accountMigrationExportAccount, setAccountMigrationExportAccount] =
+    useState<Account | null>(null);
+  const [accountMigrationExportPassword, setAccountMigrationExportPassword] = useState("");
+  const [accountMigrationExporting, setAccountMigrationExporting] = useState(false);
+  const [accountMigrationImportOpen, setAccountMigrationImportOpen] = useState(false);
+  const [accountMigrationArchive, setAccountMigrationArchive] = useState<File | null>(null);
+  const [accountMigrationImportPassword, setAccountMigrationImportPassword] = useState("");
+  const [accountMigrationPreview, setAccountMigrationPreview] =
+    useState<AccountMigrationPreview | null>(null);
+  const [accountMigrationInspecting, setAccountMigrationInspecting] = useState(false);
+  const [accountMigrationImporting, setAccountMigrationImporting] = useState(false);
+  const [accountMigrationImportProxy, setAccountMigrationImportProxy] = useState(true);
+  const [accountMigrationEnableAfterImport, setAccountMigrationEnableAfterImport] =
+    useState(false);
+  const [accountMigrationEnableChatwoot, setAccountMigrationEnableChatwoot] =
+    useState(false);
   const [accountEditorTab, setAccountEditorTab] = useState("basic");
   const [editingOriginalCookie, setEditingOriginalCookie] = useState<string | null>(null);
   const [accountCookieLoading, setAccountCookieLoading] = useState(false);
@@ -3567,6 +3589,113 @@ export default function App() {
       message.error(error instanceof Error ? error.message : "保存失败");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  function openAccountMigrationExport(account: Account) {
+    if (!isAdmin || !privacyAllowsSensitiveEditor()) return;
+    setAccountMigrationExportAccount(account);
+    setAccountMigrationExportPassword("");
+  }
+
+  async function runAccountMigrationExport() {
+    if (!accountMigrationExportAccount) return;
+    if (accountMigrationExportPassword.length < 8) {
+      message.warning("迁移密码至少需要 8 位");
+      return;
+    }
+    setAccountMigrationExporting(true);
+    try {
+      const result = await exportAccountMigration(
+        accountMigrationExportAccount.account_id,
+        accountMigrationExportPassword
+      );
+      const url = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      message.success("账户迁移包已生成并开始下载");
+      setAccountMigrationExportAccount(null);
+      setAccountMigrationExportPassword("");
+      await load();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "导出账户迁移包失败");
+    } finally {
+      setAccountMigrationExporting(false);
+    }
+  }
+
+  function openAccountMigrationImport() {
+    if (!isAdmin || !privacyAllowsSensitiveEditor()) return;
+    setAccountMigrationArchive(null);
+    setAccountMigrationImportPassword("");
+    setAccountMigrationPreview(null);
+    setAccountMigrationImportProxy(true);
+    setAccountMigrationEnableAfterImport(false);
+    setAccountMigrationEnableChatwoot(false);
+    setAccountMigrationImportOpen(true);
+  }
+
+  async function runAccountMigrationInspect() {
+    if (!accountMigrationArchive) {
+      message.warning("请先选择账户迁移包");
+      return;
+    }
+    if (accountMigrationImportPassword.length < 8) {
+      message.warning("请输入至少 8 位迁移密码");
+      return;
+    }
+    setAccountMigrationInspecting(true);
+    try {
+      const preview = await inspectAccountMigration(
+        accountMigrationArchive,
+        accountMigrationImportPassword
+      );
+      setAccountMigrationPreview(preview);
+      setAccountMigrationImportProxy(preview.proxy_included);
+      setAccountMigrationEnableAfterImport(false);
+      setAccountMigrationEnableChatwoot(false);
+      if (preview.can_import) {
+        message.success("迁移包预检完成");
+      }
+    } catch (error) {
+      setAccountMigrationPreview(null);
+      message.error(error instanceof Error ? error.message : "账户迁移包预检失败");
+    } finally {
+      setAccountMigrationInspecting(false);
+    }
+  }
+
+  async function runAccountMigrationImport() {
+    if (!accountMigrationPreview?.can_import) return;
+    setAccountMigrationImporting(true);
+    try {
+      const imported = await importAccountMigration({
+        session_id: accountMigrationPreview.session_id,
+        import_proxy: accountMigrationImportProxy,
+        enable_after_import: accountMigrationEnableAfterImport,
+        enable_chatwoot_after_import:
+          accountMigrationEnableAfterImport && accountMigrationEnableChatwoot
+      });
+      message.success(
+        accountMigrationEnableAfterImport
+          ? `账户“${accountDisplayName(imported)}”已导入并启用`
+          : `账户“${accountDisplayName(imported)}”已导入并保持停用`
+      );
+      setAccountMigrationImportOpen(false);
+      setDrawerOpen(false);
+      setAccountMigrationPreview(null);
+      setAccountMigrationArchive(null);
+      setAccountMigrationImportPassword("");
+      await load();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "导入账户迁移包失败");
+    } finally {
+      setAccountMigrationImporting(false);
     }
   }
 
@@ -8156,6 +8285,15 @@ export default function App() {
                     : []),
                   { key: "runtime-logs", icon: <HistoryOutlined />, label: "运行日志" },
                   { key: "cookie-renewal", icon: <HistoryOutlined />, label: "Cookie" },
+                  ...(isAdmin
+                    ? [
+                        {
+                          key: "export-migration",
+                          icon: <DownloadOutlined />,
+                          label: "导出账户迁移包"
+                        }
+                      ]
+                    : []),
                   ...(canMutate
                     ? [
                         { type: "divider" as const },
@@ -8174,6 +8312,8 @@ export default function App() {
                     openRuntimeLogDrawer(account);
                   } else if (key === "cookie-renewal") {
                     void showCookieRenewalStatus(account);
+                  } else if (key === "export-migration") {
+                    openAccountMigrationExport(account);
                   } else if (key === "enable" || key === "disable") {
                     runToggleAccountEnabled(account);
                   } else if (key === "delete") {
@@ -8196,6 +8336,7 @@ export default function App() {
       accountBrowserStatuses,
       accountReordering,
       canMutate,
+      isAdmin,
       accountAutoReplyUpdatingId,
       accountWorkspaceVisibilityUpdatingKeys,
       compactLayout,
@@ -14125,6 +14266,11 @@ export default function App() {
             <Button loading={qrLoading} onClick={() => void beginQRLogin()}>
               扫码登录
             </Button>
+            {!editing && isAdmin ? (
+              <Button icon={<FileZipOutlined />} onClick={openAccountMigrationImport}>
+                账户迁移包导入
+              </Button>
+            ) : null}
             <Button onClick={() => setDrawerOpen(false)}>取消</Button>
             <Button type="primary" loading={submitting} onClick={() => void submitForm()}>
               保存
@@ -14901,6 +15047,230 @@ export default function App() {
             )}
           />
         </div>
+      </Modal>
+
+      <Modal
+        title="导出账户迁移包"
+        open={Boolean(accountMigrationExportAccount)}
+        confirmLoading={accountMigrationExporting}
+        okText="加密并下载"
+        cancelText="取消"
+        okButtonProps={{ disabled: accountMigrationExportPassword.length < 8 }}
+        onOk={() => void runAccountMigrationExport()}
+        onCancel={() => {
+          if (accountMigrationExporting) return;
+          setAccountMigrationExportAccount(null);
+          setAccountMigrationExportPassword("");
+        }}
+      >
+        <Space direction="vertical" size={16} className="full-width">
+          <Alert
+            type="warning"
+            showIcon
+            message="迁移包包含敏感登录资料"
+            description="将导出闲鱼 Cookie、账户身份、代理凭据、浏览器指纹配置和浏览器 Profile。导出期间会安全关闭该账户的浏览器；请通过可信渠道传递迁移包和密码。"
+          />
+          <Descriptions size="small" column={1} bordered>
+            <Descriptions.Item label="账户">
+              {accountMigrationExportAccount
+                ? accountDisplayName(accountMigrationExportAccount)
+                : "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="导入策略">
+              在新平台生成新的内部账户 ID，不迁移消息、订单、商品和 Chatwoot 映射
+            </Descriptions.Item>
+          </Descriptions>
+          <div>
+            <Text strong>迁移密码</Text>
+            <Input.Password
+              className="account-migration-password"
+              value={accountMigrationExportPassword}
+              autoComplete="new-password"
+              placeholder="至少 8 位；导入时必须使用同一密码"
+              onChange={(event) => setAccountMigrationExportPassword(event.target.value)}
+              onPressEnter={() => void runAccountMigrationExport()}
+            />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="导入账户迁移包"
+        width={680}
+        open={accountMigrationImportOpen}
+        destroyOnClose
+        maskClosable={!accountMigrationInspecting && !accountMigrationImporting}
+        onCancel={() => {
+          if (accountMigrationInspecting || accountMigrationImporting) return;
+          setAccountMigrationImportOpen(false);
+          setAccountMigrationArchive(null);
+          setAccountMigrationImportPassword("");
+          setAccountMigrationPreview(null);
+        }}
+        footer={
+          <Space wrap>
+            <Button
+              disabled={accountMigrationInspecting || accountMigrationImporting}
+              onClick={() => setAccountMigrationImportOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              loading={accountMigrationInspecting}
+              disabled={accountMigrationImporting}
+              onClick={() => void runAccountMigrationInspect()}
+            >
+              预检迁移包
+            </Button>
+            <Button
+              type="primary"
+              loading={accountMigrationImporting}
+              disabled={!accountMigrationPreview?.can_import || accountMigrationInspecting}
+              onClick={() => void runAccountMigrationImport()}
+            >
+              确认导入
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={16} className="full-width">
+          <Alert
+            type="info"
+            showIcon
+            message="先预检，确认后再写入"
+            description="预检只会解密并检查账户身份、指纹、代理和浏览器环境冲突，不会创建账户。预检结果 15 分钟内有效。"
+          />
+          <Upload.Dragger
+            accept=".zip,.xianyu.zip,application/zip"
+            maxCount={1}
+            disabled={accountMigrationInspecting || accountMigrationImporting}
+            beforeUpload={(file) => {
+              if (!file.name.toLowerCase().endsWith(".zip")) {
+                message.error("请选择 .xianyu.zip 账户迁移包");
+                return Upload.LIST_IGNORE;
+              }
+              if (file.size > 512 * 1024 * 1024) {
+                message.error("账户迁移包不能超过 512 MB");
+                return Upload.LIST_IGNORE;
+              }
+              setAccountMigrationArchive(file);
+              setAccountMigrationPreview(null);
+              return false;
+            }}
+            onRemove={() => {
+              setAccountMigrationArchive(null);
+              setAccountMigrationPreview(null);
+            }}
+          >
+            <p className="ant-upload-drag-icon"><FileZipOutlined /></p>
+            <p className="ant-upload-text">点击或拖入账户迁移包</p>
+            <p className="ant-upload-hint">仅支持本平台导出的 .xianyu.zip，最大 512 MB</p>
+          </Upload.Dragger>
+          <div>
+            <Text strong>迁移密码</Text>
+            <Input.Password
+              value={accountMigrationImportPassword}
+              autoComplete="new-password"
+              placeholder="输入导出时设置的迁移密码"
+              disabled={accountMigrationInspecting || accountMigrationImporting}
+              onChange={(event) => {
+                setAccountMigrationImportPassword(event.target.value);
+                setAccountMigrationPreview(null);
+              }}
+              onPressEnter={() => void runAccountMigrationInspect()}
+            />
+          </div>
+
+          {accountMigrationPreview ? (
+            <>
+              {accountMigrationPreview.conflicts.length ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="当前不能导入"
+                  description={accountMigrationPreview.conflicts.join("；")}
+                />
+              ) : null}
+              {accountMigrationPreview.warnings.length ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="导入提示"
+                  description={accountMigrationPreview.warnings.join("；")}
+                />
+              ) : null}
+              <Descriptions size="small" column={2} bordered>
+                <Descriptions.Item label="闲鱼账户">
+                  {accountMigrationPreview.platform_display_name || "名称待同步"}
+                </Descriptions.Item>
+                <Descriptions.Item label="平台用户 ID">
+                  {accountMigrationPreview.platform_user_id || "迁移包未记录"}
+                </Descriptions.Item>
+                <Descriptions.Item label="Cookie">
+                  {accountMigrationPreview.cookie_present ? "已包含" : "未包含"}
+                </Descriptions.Item>
+                <Descriptions.Item label="浏览器环境">
+                  {rawBrowserEngineLabel(accountMigrationPreview.browser_identity.browser_engine)}
+                  {accountMigrationPreview.browser_available ? "（可用）" : "（当前机器缺失）"}
+                </Descriptions.Item>
+                <Descriptions.Item label="浏览器 Profile">
+                  {accountMigrationPreview.profile_present
+                    ? `${formatBytes(accountMigrationPreview.profile_size_bytes)} / ${accountMigrationPreview.profile_file_count} 个文件`
+                    : "未包含"}
+                </Descriptions.Item>
+                <Descriptions.Item label="代理">
+                  {accountMigrationPreview.proxy_included
+                    ? accountMigrationPreview.proxy_name || "已包含"
+                    : "未包含"}
+                </Descriptions.Item>
+                <Descriptions.Item label="导出时间">
+                  {formatTime(accountMigrationPreview.exported_at)}
+                </Descriptions.Item>
+                <Descriptions.Item label="预检有效期">
+                  {formatTime(accountMigrationPreview.expires_at)}
+                </Descriptions.Item>
+              </Descriptions>
+              <Card size="small" title="导入后状态">
+                <Space direction="vertical" size={12} className="full-width">
+                  {accountMigrationPreview.proxy_included ? (
+                    <Space>
+                      <Switch
+                        checked={accountMigrationImportProxy}
+                        onChange={setAccountMigrationImportProxy}
+                      />
+                      <Text>同时创建并绑定迁移包中的代理</Text>
+                    </Space>
+                  ) : null}
+                  <Space>
+                    <Switch
+                      checked={accountMigrationEnableAfterImport}
+                      disabled={
+                        !accountMigrationPreview.cookie_present ||
+                        !accountMigrationPreview.browser_available
+                      }
+                      onChange={(checked) => {
+                        setAccountMigrationEnableAfterImport(checked);
+                        if (!checked) setAccountMigrationEnableChatwoot(false);
+                      }}
+                    />
+                    <Text>导入完成后立即启用账户</Text>
+                  </Space>
+                  <Space>
+                    <Switch
+                      checked={accountMigrationEnableChatwoot}
+                      disabled={!accountMigrationEnableAfterImport}
+                      onChange={setAccountMigrationEnableChatwoot}
+                    />
+                    <Text>同时启用 Chatwoot 同步</Text>
+                  </Space>
+                  <Text type="secondary">
+                    默认保持停用，便于先核对代理、浏览器版本和 Cookie；Chatwoot 历史映射不会迁移。
+                  </Text>
+                </Space>
+              </Card>
+            </>
+          ) : null}
+        </Space>
       </Modal>
 
       <Modal

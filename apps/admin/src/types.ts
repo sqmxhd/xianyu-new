@@ -1511,6 +1511,36 @@ export interface AccountCookie {
   cookie_updated_at?: string | null;
 }
 
+export interface AccountMigrationPreview {
+  session_id: string;
+  expires_at: string;
+  exported_at: string;
+  source_account_id: string;
+  platform_user_id?: string | null;
+  platform_display_name?: string | null;
+  remark?: string | null;
+  cookie_present: boolean;
+  browser_identity: AccountBrowserIdentity;
+  browser_available: boolean;
+  profile_present: boolean;
+  profile_size_bytes: number;
+  profile_file_count: number;
+  proxy_included: boolean;
+  proxy_name?: string | null;
+  desired_enabled: boolean;
+  desired_chat_enabled: boolean;
+  conflicts: string[];
+  warnings: string[];
+  can_import: boolean;
+}
+
+export interface AccountMigrationImportValues {
+  session_id: string;
+  import_proxy: boolean;
+  enable_after_import: boolean;
+  enable_chatwoot_after_import: boolean;
+}
+
 export interface CookieRenewalAttempt {
   attempt_id: string;
   trigger: "manual" | "scheduled" | "auth_recovery";

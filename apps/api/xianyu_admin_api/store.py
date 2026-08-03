@@ -758,6 +758,25 @@ class AccountStore:
                 automation_owner_user_id,
             )
 
+    async def import_migrated_account(
+        self,
+        payload: AccountCreatePayload,
+        *,
+        platform_user_id: str | None,
+        platform_display_name: str | None,
+        platform_avatar_url: str | None,
+        proxy: ProxyCreatePayload | None,
+    ) -> AccountRecord:
+        async with self._lock:
+            return await run_db_blocking(
+                self._import_migrated_account_sync,
+                payload,
+                platform_user_id,
+                platform_display_name,
+                platform_avatar_url,
+                proxy,
+            )
+
     async def update_account(
         self,
         account_id: str,
@@ -2971,6 +2990,151 @@ class AccountStore:
                 account_id=account_id,
             )
             return self._row_to_record(row)
+
+    def _import_migrated_account_sync(
+        self,
+        payload: AccountCreatePayload,
+        platform_user_id: str | None,
+        platform_display_name: str | None,
+        platform_avatar_url: str | None,
+        proxy: ProxyCreatePayload | None,
+    ) -> AccountRecord:
+        """Create one migrated account and its optional proxy in one transaction."""
+
+        now = utcnow()
+        account_id = uuid.uuid4().hex
+        normalized_platform_user_id = str(platform_user_id or "").strip() or None
+        cookie_match = re.search(r"(?:^|;\s*)unb=([^;]+)", payload.cookie or "")
+        cookie_user_id = cookie_match.group(1).strip() if cookie_match else None
+        if normalized_platform_user_id and cookie_user_id and normalized_platform_user_id != cookie_user_id:
+            raise ValueError("迁移包 Cookie 与平台账户身份不一致")
+        effective_platform_user_id = normalized_platform_user_id or cookie_user_id
+        identity = payload.browser_identity.writable_copy()
+
+        with self._session_factory() as session:
+            existing_accounts = session.execute(
+                select(
+                    AccountORM.account_id,
+                    AccountORM.platform_user_id,
+                    AccountORM.cookie,
+                )
+            ).all()
+            if effective_platform_user_id:
+                for existing_id, existing_platform_user_id, existing_cookie in existing_accounts:
+                    existing_match = re.search(
+                        r"(?:^|;\s*)unb=([^;]+)", existing_cookie or ""
+                    )
+                    existing_cookie_user_id = (
+                        existing_match.group(1).strip() if existing_match else None
+                    )
+                    if effective_platform_user_id in {
+                        str(existing_platform_user_id or "").strip() or None,
+                        existing_cookie_user_id,
+                    }:
+                        raise ValueError(
+                            f"该闲鱼账户已经存在（内部账户 {existing_id[:8]}）"
+                        )
+
+            self._assert_fingerprint_seed_available(
+                session,
+                identity.fingerprint_seed,
+                account_id,
+            )
+
+            proxy_row: ProxyORM | None = None
+            if proxy is not None:
+                duplicate_proxy = session.scalars(
+                    select(ProxyORM).where(ProxyORM.name == proxy.name).limit(1)
+                ).first()
+                if duplicate_proxy is not None:
+                    raise ValueError(f"代理名称“{proxy.name}”已经存在")
+                proxy_row = ProxyORM(
+                    proxy_id=uuid.uuid4().hex,
+                    name=proxy.name,
+                    enabled=True,
+                    scheme=proxy.scheme,
+                    host=proxy.host,
+                    port=proxy.port,
+                    username=proxy.username,
+                    password=proxy.password,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(proxy_row)
+
+            row = AccountORM(
+                account_id=account_id,
+                remark=payload.remark,
+                platform="xianyu",
+                platform_user_id=effective_platform_user_id,
+                platform_display_name=(
+                    str(platform_display_name or "").strip()[:255] or None
+                ),
+                platform_avatar_url=(
+                    str(platform_avatar_url or "").strip()[:1000] or None
+                ),
+                platform_identity_source="account_import",
+                platform_identity_checked_at=now if effective_platform_user_id else None,
+                sort_order=int(session.scalar(select(func.max(AccountORM.sort_order))) or 0)
+                + 100,
+                cookie=payload.cookie,
+                enabled=payload.enabled,
+                conversation_visible=payload.conversation_visible,
+                chat_enabled=payload.chat_enabled,
+                order_management_visible=payload.order_management_visible,
+                product_management_visible=payload.product_management_visible,
+                automation_owner_user_id=None,
+                proxy_id=proxy_row.proxy_id if proxy_row is not None else None,
+                cookie_updated_at=now if payload.cookie else None,
+                cookie_update_source="account_import" if payload.cookie else None,
+                created_at=now,
+                updated_at=now,
+            )
+            row.browser_identity = self._new_browser_identity_row(
+                account_id,
+                identity,
+                now=now,
+            )
+            row.runtime = RuntimeStatusORM(
+                account_id=account_id,
+                state="stopped" if payload.enabled else "disabled",
+                message="账户迁移包已导入，等待首次连接" if payload.enabled else "迁移账户已导入并保持停用",
+                updated_at=now,
+            )
+            row.auto_reply_setting = AutoReplySettingORM(
+                account_id=account_id,
+                enabled=False,
+                default_reply_enabled=False,
+                default_reply_text="",
+                created_at=now,
+                updated_at=now,
+            )
+            row.delivery_automation_setting = DeliveryAutomationSettingORM(
+                account_id=account_id,
+                enabled=False,
+                mode="manual_only",
+                require_order_card=True,
+                duplicate_guard_enabled=True,
+                order_status_allowlist=json.dumps(
+                    ["WAIT_SELLER_SEND_GOODS", "待发货", "待卖家发货"],
+                    ensure_ascii=False,
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            self._add_event(
+                session,
+                account_id=account_id,
+                state=row.runtime.state,
+                message="账户已通过迁移包导入",
+            )
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                raise ValueError("账户迁移数据与现有账户发生冲突") from exc
+            return self._get_account_sync(account_id)  # type: ignore[return-value]
 
     def _update_account_sync(
         self,

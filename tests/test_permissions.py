@@ -62,6 +62,12 @@ class PermissionTests(unittest.TestCase):
                 _request("GET", "/api/settings/message-services/chatwoot"),
             )
         )
+        self.assertFalse(
+            _has_permission(
+                operator,
+                _request("POST", "/api/account-migrations/inspect"),
+            )
+        )
 
     def test_web_notification_playback_is_readable_but_configuration_is_admin_only(self) -> None:
         operator = _user("operator")

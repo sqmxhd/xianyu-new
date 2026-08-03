@@ -1,5 +1,7 @@
 import type {
   Account,
+  AccountMigrationImportValues,
+  AccountMigrationPreview,
   AccountAutoReplyStatus,
   AccountConnectionHealth,
   AccountBrowserSession,
@@ -454,6 +456,65 @@ export function updateAccountWorkspaceVisibility(
 export function revealAccountCookie(accountId: string): Promise<AccountCookie> {
   return request<AccountCookie>(`/api/accounts/${accountId}/cookie/reveal`, {
     method: "POST"
+  });
+}
+
+export async function exportAccountMigration(
+  accountId: string,
+  password: string
+): Promise<{ blob: Blob; filename: string }> {
+  const accessToken = getStoredAccessToken();
+  const body = new FormData();
+  body.append("password", password);
+  const response = await fetch(
+    `${API_BASE}/api/account-migrations/export/${encodeURIComponent(accountId)}`,
+    {
+      method: "POST",
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      body
+    }
+  );
+  if (!response.ok) {
+    let detail: unknown = response.statusText;
+    try {
+      const result = await response.json();
+      detail = result.detail ?? detail;
+    } catch {
+      // Keep HTTP status text.
+    }
+    throw new ApiRequestError(response.status, detail);
+  }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  let filename = "xianyu-account.xianyu.zip";
+  try {
+    filename = decodeURIComponent(utf8Name || plainName || filename);
+  } catch {
+    filename = plainName || filename;
+  }
+  return { blob: await response.blob(), filename };
+}
+
+export function inspectAccountMigration(
+  archive: File,
+  password: string
+): Promise<AccountMigrationPreview> {
+  const body = new FormData();
+  body.append("archive", archive);
+  body.append("password", password);
+  return request<AccountMigrationPreview>("/api/account-migrations/inspect", {
+    method: "POST",
+    body
+  });
+}
+
+export function importAccountMigration(
+  values: AccountMigrationImportValues
+): Promise<Account> {
+  return request<Account>("/api/account-migrations/import", {
+    method: "POST",
+    body: JSON.stringify(values)
   });
 }
 

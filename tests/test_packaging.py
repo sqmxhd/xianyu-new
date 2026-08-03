@@ -434,7 +434,7 @@ exit 1
         self.assertIn('"sqlalchemy.dialects.postgresql.psycopg"', spec)
         self.assertNotIn("`trigger`", database)
 
-    def test_gateway_limits_browser_archives_without_widening_general_api(
+    def test_gateway_limits_large_archives_without_widening_general_api(
         self,
     ) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -455,9 +455,10 @@ exit 1
                     "location = /api/settings/browser-runtime/fingerprint/upload",
                     contents,
                 )
-                self.assertEqual(contents.count("client_max_body_size 520m;"), 2)
+                self.assertIn("location ^~ /api/account-migrations/", contents)
+                self.assertEqual(contents.count("client_max_body_size 520m;"), 3)
                 self.assertEqual(contents.count("client_max_body_size 64m;"), 1)
-                self.assertEqual(contents.count("proxy_request_buffering off;"), 2)
+                self.assertEqual(contents.count("proxy_request_buffering off;"), 3)
                 self.assertGreaterEqual(contents.count("access_log off;"), 2)
 
     def test_source_runtime_and_resource_roots_are_stable(self) -> None:

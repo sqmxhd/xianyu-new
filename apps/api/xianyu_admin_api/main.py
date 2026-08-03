@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from integrations.xianyu_core.images import (
@@ -50,6 +51,12 @@ from .browser_binaries import (
     browser_binary_manager,
     browser_runtime_payload,
     standard_browser_binary_manager,
+)
+from .browser_profiles import BrowserProfileStorage
+from .account_migrations import (
+    AccountMigrationArchiveService,
+    AccountMigrationError,
+    StagedAccountMigration,
 )
 from .chatwoot import (
     ChatwootIntegrationError,
@@ -82,6 +89,8 @@ from .schemas import (
     AccountCreatePayload,
     AccountCookiePayload,
     AccountConnectionHealthPayload,
+    AccountMigrationImportPayload,
+    AccountMigrationPreviewPayload,
     AccountPayload,
     AccountReorderPayload,
     AccountUpdatePayload,
@@ -250,6 +259,10 @@ im_verification_manager = IMVerificationManager(
     runtime_manager,
     cookie_renewal_manager,
 )
+account_migration_service = AccountMigrationArchiveService(
+    BrowserProfileStorage(settings.im_verification_profile_dir)
+)
+account_migration_lock = asyncio.Lock()
 runtime_manager.set_cookie_auth_failure_handler(
     lambda account_id, source, message: cookie_renewal_manager.handle_auth_expired(
         account_id,
@@ -604,6 +617,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/settings/ai-provider",
     "/api/settings/browser-runtime",
     "/api/settings/message-services",
+    "/api/account-migrations",
 )
 
 
@@ -674,6 +688,84 @@ def _browser_identity_profile_signature(identity: AccountBrowserIdentityPayload)
         writable.spoof_fonts,
         writable.spoof_client_rects,
         writable.webrtc_policy,
+    )
+
+
+def _migration_browser_available(identity: AccountBrowserIdentityPayload) -> bool:
+    try:
+        if identity.browser_engine == "fingerprint_chromium":
+            browser_binary_manager.resolve_fingerprint_executable(identity.browser_version)
+        elif identity.browser_version:
+            standard_browser_binary_manager.resolve_executable(identity.browser_version)
+        elif not browser_binary_manager.system_browser().available:
+            return False
+        return True
+    except BrowserBinaryError:
+        return False
+
+
+async def _account_migration_preview(
+    staged: StagedAccountMigration,
+) -> AccountMigrationPreviewPayload:
+    migrated = staged.account
+    conflicts: list[str] = []
+    warnings: list[str] = []
+    identity_user_id = migrated.platform_user_id or migrated.cookie_user_id
+    for account in await store.list_accounts():
+        existing_cookie_user_id = None
+        for part in account.cookie.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name == "unb" and value.strip():
+                existing_cookie_user_id = value.strip()
+                break
+        if identity_user_id and identity_user_id in {
+            account.platform_user_id,
+            existing_cookie_user_id,
+        }:
+            conflicts.append(f"该闲鱼账户已存在：{account.display_name}")
+        if (
+            migrated.browser_identity.fingerprint_seed is not None
+            and migrated.browser_identity.fingerprint_seed
+            == account.browser_identity.fingerprint_seed
+        ):
+            conflicts.append(f"指纹 Seed 已被账户“{account.display_name}”使用")
+
+    if migrated.proxy is not None:
+        for proxy in await store.list_proxies():
+            if proxy.name == migrated.proxy.name:
+                warnings.append(
+                    f"代理名称“{migrated.proxy.name}”已存在；请关闭“导入代理”后再导入"
+                )
+                break
+    browser_available = _migration_browser_available(migrated.browser_identity)
+    if not browser_available:
+        version = migrated.browser_identity.browser_version or "系统版本"
+        warnings.append(f"目标平台缺少对应浏览器内核 {version}，导入后必须保持停用")
+    if not migrated.cookie:
+        warnings.append("迁移包没有 Cookie，导入后需要重新扫码登录")
+    if not staged.profile_path:
+        warnings.append("迁移包未包含浏览器 Profile，将只恢复 Cookie 和指纹配置")
+    return AccountMigrationPreviewPayload(
+        session_id=staged.session_id,
+        expires_at=staged.expires_at,
+        exported_at=migrated.exported_at,
+        source_account_id=migrated.source_account_id,
+        platform_user_id=migrated.platform_user_id or migrated.cookie_user_id,
+        platform_display_name=migrated.platform_display_name,
+        remark=migrated.remark,
+        cookie_present=bool(migrated.cookie),
+        browser_identity=migrated.browser_identity,
+        browser_available=browser_available,
+        profile_present=staged.profile_path is not None,
+        profile_size_bytes=staged.profile_size_bytes,
+        profile_file_count=staged.profile_file_count,
+        proxy_included=migrated.proxy is not None,
+        proxy_name=migrated.proxy.name if migrated.proxy else None,
+        desired_enabled=migrated.desired_enabled,
+        desired_chat_enabled=migrated.desired_chat_enabled,
+        conflicts=list(dict.fromkeys(conflicts)),
+        warnings=list(dict.fromkeys(warnings)),
+        can_import=not conflicts,
     )
 
 
@@ -1500,6 +1592,191 @@ async def create_xianyu_qr_browser_verification_vnc_ticket(
     except IMVerificationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return IMVerificationTicketPayload(ticket=ticket, expires_in=expires_in)
+
+
+@app.post("/api/account-migrations/export/{account_id}")
+async def export_account_migration(
+    account_id: str,
+    password: str = Form(min_length=8, max_length=256),
+) -> FileResponse:
+    async with account_migration_lock:
+        account = await store.get_account(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        previous_state = account.runtime.state if account.runtime else "stopped"
+        restore_runtime = previous_state in {"connecting", "online", "reconnecting"}
+        package = None
+        try:
+            profile_key = account_migration_service.profile_storage.account_profile_key(
+                account_id
+            )
+            await im_verification_manager.stop_browser_profile(profile_key)
+            if restore_runtime:
+                await runtime_manager.stop(account_id)
+            latest = await store.get_account(account_id)
+            if latest is None:
+                raise HTTPException(status_code=404, detail="account not found")
+            package = await run_external_blocking(
+                account_migration_service.create_package,
+                latest,
+                password,
+            )
+        except AccountMigrationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            if restore_runtime:
+                latest = await store.get_account(account_id)
+                if latest is not None:
+                    try:
+                        await runtime_manager.start(latest, force_restart=True)
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore account runtime after migration export account=%s",
+                            account_id,
+                        )
+        if package is None:
+            raise HTTPException(status_code=500, detail="账户迁移包生成失败")
+        return FileResponse(
+            package.path,
+            media_type="application/zip",
+            filename=package.filename,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+            background=BackgroundTask(account_migration_service.remove_export, package),
+        )
+
+
+@app.post(
+    "/api/account-migrations/inspect",
+    response_model=AccountMigrationPreviewPayload,
+)
+async def inspect_account_migration(
+    archive: UploadFile = File(...),
+    password: str = Form(min_length=8, max_length=256),
+) -> AccountMigrationPreviewPayload:
+    try:
+        staged = await run_external_blocking(
+            account_migration_service.inspect_package,
+            archive.file,
+            archive.filename or "account.xianyu.zip",
+            password,
+        )
+    except AccountMigrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await archive.close()
+    return await _account_migration_preview(staged)
+
+
+@app.post(
+    "/api/account-migrations/import",
+    response_model=AccountPayload,
+    status_code=201,
+)
+async def import_account_migration(
+    payload: AccountMigrationImportPayload,
+) -> AccountPayload:
+    async with account_migration_lock:
+        try:
+            staged = account_migration_service.get_session(payload.session_id)
+        except AccountMigrationError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        preview = await _account_migration_preview(staged)
+        if not preview.can_import:
+            raise HTTPException(status_code=409, detail="；".join(preview.conflicts))
+        migrated = staged.account
+        if payload.enable_after_import and not migrated.cookie:
+            raise HTTPException(status_code=409, detail="迁移包没有 Cookie，不能直接启用账户")
+        if payload.enable_after_import and not preview.browser_available:
+            raise HTTPException(
+                status_code=409,
+                detail="目标平台缺少迁移账户使用的浏览器内核，请导入后安装内核再启用",
+            )
+        proxy_payload = None
+        if payload.import_proxy and migrated.proxy is not None:
+            if any(
+                proxy.name == migrated.proxy.name for proxy in await store.list_proxies()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"代理名称“{migrated.proxy.name}”已经存在，请关闭导入代理后重试",
+                )
+            proxy_payload = ProxyCreatePayload(
+                name=migrated.proxy.name,
+                enabled=True,
+                scheme=migrated.proxy.scheme,
+                host=migrated.proxy.host,
+                port=migrated.proxy.port,
+                username=migrated.proxy.username,
+                password=migrated.proxy.password,
+            )
+        create_payload = AccountCreatePayload(
+            remark=migrated.remark,
+            cookie=migrated.cookie,
+            enabled=payload.enable_after_import,
+            conversation_visible=migrated.conversation_visible,
+            chat_enabled=(
+                payload.enable_after_import and payload.enable_chatwoot_after_import
+            ),
+            order_management_visible=migrated.order_management_visible,
+            product_management_visible=migrated.product_management_visible,
+            browser_identity=migrated.browser_identity,
+        )
+        created = None
+        imported_proxy_id = None
+        try:
+            created = await store.import_migrated_account(
+                create_payload,
+                platform_user_id=migrated.platform_user_id or migrated.cookie_user_id,
+                platform_display_name=migrated.platform_display_name,
+                platform_avatar_url=migrated.platform_avatar_url,
+                proxy=proxy_payload,
+            )
+            imported_proxy_id = created.proxy_id
+            await run_browser_blocking(
+                account_migration_service.install_profile,
+                staged,
+                created,
+            )
+        except (AccountMigrationError, ProxyAssignmentConflict, ValueError) as exc:
+            if created is not None:
+                await store.delete_account(created.account_id)
+                if imported_proxy_id:
+                    with suppress(ValueError):
+                        await store.delete_proxy(imported_proxy_id)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception:
+            if created is not None:
+                await store.delete_account(created.account_id)
+                if imported_proxy_id:
+                    with suppress(ValueError):
+                        await store.delete_proxy(imported_proxy_id)
+            raise
+
+        account_migration_service.complete_session(payload.session_id)
+        latest = await store.get_account(created.account_id)
+        if latest is None:
+            raise HTTPException(status_code=500, detail="导入后账户读取失败")
+        result = latest.to_payload()
+        if payload.enable_after_import:
+            result = await runtime_manager.start(latest, force_restart=True)
+        await realtime_broker.publish(
+            {
+                "event": "account_upsert",
+                "account_id": created.account_id,
+                "data": result.model_dump(mode="json"),
+            }
+        )
+        if payload.enable_chatwoot_after_import:
+            await enqueue_account_metadata_sync(
+                store,
+                account_id=created.account_id,
+                reason="account-imported",
+            )
+        return result
 
 
 @app.get("/api/accounts", response_model=list[AccountPayload])
