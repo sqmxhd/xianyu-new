@@ -216,6 +216,10 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn('DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"', deploy)
         self.assertIn("docker load", deploy)
         self.assertIn("docker pull", deploy)
+        self.assertIn('docker pull --platform "$TARGET_PLATFORM"', deploy)
+        self.assertIn('TARGET_PLATFORM="linux/amd64"', deploy)
+        self.assertIn("镜像平台不匹配：期望", deploy)
+        self.assertIn("复用本地镜像", deploy)
         self.assertIn("在线拉取官方镜像", deploy)
         self.assertIn("导入本地官方镜像包", deploy)
         self.assertIn("chatwoot/chatwoot:v4.16.0", deploy)
@@ -293,6 +297,7 @@ case \"$1:$2\" in
   image:rm) exit 0 ;;
   image:inspect)
     case \"$*\" in
+      *'.Os}}/{{.Architecture'*) printf 'linux/amd64\\n' ;;
       *Architecture*) printf 'amd64\\n' ;;
       *org.opencontainers.image.version*) printf '%s\\n' \"${last##*:}\" ;;
       *org.opencontainers.image.revision*) printf 'test-revision\\n' ;;
@@ -325,6 +330,7 @@ exit 1
                 'COMPOSE_FILE="$SCRIPT_DIR/compose.all.yml"\n'
                 'PACKAGE_GLOB="xianyu-admin-*-linux-amd64.docker.tar.gz"\n'
                 'COMPOSE_PROJECT_NAME="xianyu"\n'
+                'TARGET_PLATFORM="linux/amd64"\n'
                 'UPGRADE_ROLLBACK_ACTIVE=false\n'
                 'UPGRADE_BACKUP_RELEASE=""\n'
                 'UPGRADE_BACKUP_IMAGE=""\n'

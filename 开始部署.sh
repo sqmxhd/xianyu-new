@@ -9,6 +9,7 @@ DEPLOY_ROOT="$SCRIPT_DIR/XIANYU_DATA"
 COMPOSE_FILE="$SCRIPT_DIR/compose.all.yml"
 PACKAGE_GLOB="xianyu-admin-*-linux-amd64.docker.tar.gz"
 COMPOSE_PROJECT_NAME="xianyu"
+TARGET_PLATFORM="linux/amd64"
 UPGRADE_ROLLBACK_ACTIVE=false
 UPGRADE_BACKUP_RELEASE=""
 UPGRADE_BACKUP_IMAGE=""
@@ -35,6 +36,25 @@ confirm() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
+}
+
+image_platform() {
+  docker image inspect --format '{{.Os}}/{{.Architecture}}' "$1" 2>/dev/null
+}
+
+validate_image_platform() {
+  local reference="$1" label="$2" actual
+  docker image inspect "$reference" >/dev/null 2>&1 ||
+    fail "$label 镜像不存在：$reference"
+  actual="$(image_platform "$reference" || true)"
+  [ "$actual" = "$TARGET_PLATFORM" ] ||
+    fail "$label 镜像平台不匹配：期望 $TARGET_PLATFORM，实际 ${actual:-无法识别}（$reference）"
+}
+
+image_ready() {
+  local reference="$1"
+  docker image inspect "$reference" >/dev/null 2>&1 &&
+    [ "$(image_platform "$reference" || true)" = "$TARGET_PLATFORM" ]
 }
 
 ensure_dependencies() {
@@ -320,7 +340,7 @@ verify_outer_checksum() {
 
 import_package() {
   local package="$1" activate="${2:-true}" filename version source_image target_image
-  local release_dir architecture image_id image_version image_revision
+  local release_dir image_id image_version image_revision
   verify_outer_checksum "$package"
   filename="$(basename -- "$package")"
   version="$(package_version "$filename")"
@@ -332,8 +352,7 @@ import_package() {
   gzip -dc -- "$package" | docker load
   docker image inspect "$source_image" >/dev/null 2>&1 ||
     fail "镜像包未包含预期标签：$source_image"
-  architecture="$(docker image inspect --format '{{.Architecture}}' "$source_image")"
-  [ "$architecture" = amd64 ] || fail "项目镜像架构不是 linux/amd64：$architecture"
+  validate_image_platform "$source_image" "项目"
   image_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$source_image")"
   [ "$image_version" = "$version" ] ||
     fail "镜像内部版本与文件名不一致：文件=$version，镜像=${image_version:-未标记}"
@@ -405,12 +424,17 @@ load_docker_archive() {
 }
 
 prepare_official_image() {
-  local mode="$1" label="$2" hint="$3" source_image="$4" target_image="$5" archive
+  local mode="$1" label="$2" hint="$3" source_image="$4" target_image="$5"
+  local reuse="${6:-true}" archive
   local attempt
+  if [ "$reuse" = true ] && image_ready "$target_image"; then
+    success "$label 已准备，复用本地镜像：$target_image（$TARGET_PLATFORM）"
+    return 0
+  fi
   if [ "$mode" = online ]; then
     for attempt in 1 2 3; do
-      info "正在拉取 $label：$source_image（第 $attempt/3 次）"
-      if docker pull "$source_image"; then
+      info "正在拉取 $label：$source_image（$TARGET_PLATFORM，第 $attempt/3 次）"
+      if docker pull --platform "$TARGET_PLATFORM" "$source_image"; then
         break
       fi
       if [ "$attempt" -eq 3 ]; then
@@ -425,14 +449,15 @@ prepare_official_image() {
   fi
   docker image inspect "$source_image" >/dev/null 2>&1 ||
     fail "$label 镜像包未包含预期官方标签：$source_image"
-  [ "$(docker image inspect --format '{{.Architecture}}' "$source_image")" = amd64 ] ||
-    fail "$label 镜像不是 linux/amd64"
+  validate_image_platform "$source_image" "$label"
   docker tag "$source_image" "$target_image"
-  success "$label 已准备：$target_image"
+  validate_image_platform "$target_image" "$label"
+  success "$label 已准备：$target_image（$TARGET_PLATFORM）"
 }
 
 prepare_dependency_images() {
-  local mode="${1:-}" choice target="$DEPLOY_ROOT/config/images.env"
+  local mode="${1:-}" reuse="${2:-true}" choice
+  local target="$DEPLOY_ROOT/config/images.env"
   if [ -z "$mode" ]; then
     printf '\n官方依赖镜像来源：\n'
     printf '  1) 在线拉取官方镜像\n'
@@ -445,9 +470,9 @@ prepare_dependency_images() {
     esac
   fi
 
-  prepare_official_image "$mode" pgvector pgvector pgvector/pgvector:pg16 xianyu-local/pgvector:pg16
-  prepare_official_image "$mode" Redis redis redis:7.4-alpine xianyu-local/redis:7.4-alpine
-  prepare_official_image "$mode" Chatwoot chatwoot chatwoot/chatwoot:v4.16.0 xianyu-local/chatwoot:4.16.0
+  prepare_official_image "$mode" pgvector pgvector pgvector/pgvector:pg16 xianyu-local/pgvector:pg16 "$reuse"
+  prepare_official_image "$mode" Redis redis redis:7.4-alpine xianyu-local/redis:7.4-alpine "$reuse"
+  prepare_official_image "$mode" Chatwoot chatwoot chatwoot/chatwoot:v4.16.0 xianyu-local/chatwoot:4.16.0 "$reuse"
 
   umask 077
   {
@@ -468,6 +493,70 @@ current_version() {
 
 deployment_complete() {
   [ -s "$DEPLOY_ROOT/state/deployment-complete.env" ]
+}
+
+platform_secrets_ready() {
+  local name
+  for name in jwt-secret postgres-root-password postgres-password redis-password; do
+    [ -s "$DEPLOY_ROOT/secrets/xianyu/$name" ] || return 1
+  done
+  [ -s "$DEPLOY_ROOT/secrets/chatwoot.env" ]
+}
+
+dependency_image_count() {
+  local count=0 reference
+  for reference in \
+    xianyu-local/pgvector:pg16 \
+    xianyu-local/redis:7.4-alpine \
+    xianyu-local/chatwoot:4.16.0
+  do
+    image_ready "$reference" && count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
+dependency_images_ready() {
+  [ "$(dependency_image_count)" -eq 3 ] &&
+    [ -s "$DEPLOY_ROOT/config/images.env" ]
+}
+
+status_mark() {
+  if "$@"; then
+    printf '完成'
+  else
+    printf '待处理'
+  fi
+}
+
+current_deployment_step() {
+  if [ -z "$(current_version)" ]; then
+    printf '导入项目版本包'
+  elif [ ! -s "$DEPLOY_ROOT/config/deployment.env" ]; then
+    printf '配置端口和访问地址'
+  elif ! dependency_images_ready; then
+    printf '准备官方依赖镜像'
+  elif ! platform_secrets_ready; then
+    printf '生成运行密钥'
+  elif ! certificate_ready; then
+    printf '配置网站证书'
+  elif ! deployment_complete; then
+    printf '初始化数据库并启动服务'
+  else
+    printf '部署已完成'
+  fi
+}
+
+show_deployment_progress() {
+  local dependency_count
+  dependency_count="$(dependency_image_count)"
+  printf ' 部署进度：项目镜像[%s] 配置[%s] 依赖镜像[%s/3] 密钥[%s] 证书[%s] 部署[%s]\n' \
+    "$(status_mark test -n "$(current_version)")" \
+    "$(status_mark test -s "$DEPLOY_ROOT/config/deployment.env")" \
+    "$dependency_count" \
+    "$(status_mark platform_secrets_ready)" \
+    "$(status_mark certificate_ready)" \
+    "$(status_mark deployment_complete)"
+  printf ' 建议操作：%s\n' "$(current_deployment_step)"
 }
 
 mark_deployment_complete() {
@@ -519,6 +608,7 @@ verify_runtime_images() {
     [ -n "$reference" ] || fail "镜像配置缺少 $name"
     docker image inspect "$reference" >/dev/null 2>&1 ||
       fail "本地镜像不可用：$reference；请先导入版本包或运行“官方依赖镜像管理”"
+    validate_image_platform "$reference" "$name"
   done
 }
 
@@ -1055,16 +1145,20 @@ import_only() {
 
 first_deployment() {
   local package
-  deployment_complete && fail "部署已经完成，请使用“安装/升级版本包”"
-  printf '\n首次部署会在脚本同级创建 XIANYU_DATA，导入本项目镜像并启动服务。\n'
+  if deployment_complete; then
+    success "部署已经完成；如需启动或检查服务，请进入“服务管理”"
+    return 0
+  fi
+  printf '\n开始/继续部署会在脚本同级创建 XIANYU_DATA，并从当前未完成阶段继续。\n'
   printf '官方依赖镜像可选择在线拉取或从本地官方镜像包导入。\n'
-  printf '中途失败后可再次选择“首次部署”，脚本会保留并复用已经完成的步骤。\n'
+  printf '中途失败后可再次选择“开始/继续部署”，脚本会保留并复用已经完成的步骤。\n'
   printf 'Compose 项目和容器统一使用固定的 xianyu 名称。\n\n'
   printf '数据目录：%s\n' "$DEPLOY_ROOT"
+  show_deployment_progress
   if [ -n "$(current_version)" ]; then
-    confirm "检测到未完成的部署，确认继续完成首次部署？" || return 0
+    confirm "检测到未完成的部署，确认从当前阶段继续？" || return 0
   else
-    confirm "确认开始首次部署？" || return 0
+    confirm "确认开始部署？" || return 0
   fi
   ensure_layout
   if [ -z "$(current_version)" ]; then
@@ -1078,8 +1172,8 @@ first_deployment() {
   else
     success "复用已有端口和 URL 配置"
   fi
-  if [ ! -s "$DEPLOY_ROOT/config/images.env" ]; then
-    prepare_dependency_images
+  if ! dependency_images_ready; then
+    prepare_dependency_images "" true
   else
     success "复用已准备的官方依赖镜像配置"
   fi
@@ -1094,7 +1188,7 @@ first_deployment() {
 }
 
 dependency_image_management() {
-  prepare_dependency_images
+  prepare_dependency_images "" false
   if [ -n "$(current_version)" ] \
     && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
     && compose ps --status running -q 2>/dev/null | grep -q .; then
@@ -1105,13 +1199,138 @@ dependency_image_management() {
   fi
 }
 
+restart_stack() {
+  compose restart
+  success "服务已重启"
+}
+
+show_image_diagnostics() {
+  local version project_image reference platform state
+  local -a labels=("闲鱼项目" pgvector Redis Chatwoot)
+  local -a references=(
+    ""
+    xianyu-local/pgvector:pg16
+    xianyu-local/redis:7.4-alpine
+    xianyu-local/chatwoot:4.16.0
+  )
+  version="$(current_version)"
+  if [ -n "$version" ]; then
+    project_image="$(sed -n 's/^XIANYU_IMAGE=//p' \
+      "$DEPLOY_ROOT/state/current-release.env" | tail -n 1)"
+    references[0]="$project_image"
+  fi
+  printf '\n镜像诊断（目标平台 %s）：\n' "$TARGET_PLATFORM"
+  for state in "${!labels[@]}"; do
+    reference="${references[$state]}"
+    if [ -z "$reference" ]; then
+      printf '  %-10s 未配置\n' "${labels[$state]}"
+    elif docker image inspect "$reference" >/dev/null 2>&1; then
+      platform="$(image_platform "$reference" || true)"
+      if [ "$platform" = "$TARGET_PLATFORM" ]; then
+        printf '  %-10s 正常  %s  %s\n' "${labels[$state]}" "$platform" "$reference"
+      else
+        printf '  %-10s 异常  %s  %s\n' \
+          "${labels[$state]}" "${platform:-无法识别}" "$reference"
+      fi
+    else
+      printf '  %-10s 缺失  %s\n' "${labels[$state]}" "$reference"
+    fi
+  done
+}
+
+deployment_diagnostics() {
+  local daemon_platform context
+  printf '\n部署诊断：\n'
+  daemon_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || true)"
+  context="$(docker context show 2>/dev/null || true)"
+  printf '  Docker daemon：%s\n' "${daemon_platform:-无法识别}"
+  printf '  Docker context：%s\n' "${context:-无法识别}"
+  printf '  默认平台变量：%s\n' "${DOCKER_DEFAULT_PLATFORM:-未设置}"
+  show_deployment_progress
+  show_image_diagnostics
+  if [ -n "$(current_version)" ] \
+    && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
+    && dependency_images_ready; then
+    printf '\n容器状态：\n'
+    compose ps || true
+  fi
+}
+
+run_menu_action() {
+  local status
+  if ( "$@" ); then
+    return 0
+  else
+    status=$?
+    warn "操作未完成（退出码 $status），已返回部署菜单；已完成的数据和配置不会被删除"
+    return 0
+  fi
+}
+
+configure_deployment_action() {
+  ensure_layout
+  configure_deployment
+}
+
+dependency_image_action() {
+  ensure_layout
+  dependency_image_management
+}
+
+upgrade_version_action() {
+  ensure_layout
+  upgrade_stack
+}
+
+import_version_action() {
+  ensure_layout
+  import_only
+}
+
+service_management() {
+  local choice
+  printf '\n服务管理：\n'
+  printf '  1) 启动服务\n'
+  printf '  2) 停止服务\n'
+  printf '  3) 重启服务\n'
+  printf '  4) 查看状态\n'
+  printf '  5) 查看日志\n'
+  printf '  0) 返回\n'
+  read -r -p '请选择: ' choice
+  case "$choice" in
+    1) run_menu_action start_stack ;;
+    2) run_menu_action stop_stack ;;
+    3) run_menu_action restart_stack ;;
+    4) run_menu_action show_status ;;
+    5) run_menu_action compose logs -f --tail=200 ;;
+    0) return 0 ;;
+    *) warn "选择无效" ;;
+  esac
+}
+
+version_management() {
+  local choice
+  printf '\n版本管理：\n'
+  printf '  1) 安装/升级版本包\n'
+  printf '  2) 只导入版本包\n'
+  printf '  0) 返回\n'
+  read -r -p '请选择: ' choice
+  case "$choice" in
+    1) run_menu_action upgrade_version_action ;;
+    2) run_menu_action import_version_action ;;
+    0) return 0 ;;
+    *) warn "选择无效" ;;
+  esac
+}
+
 show_status() {
   printf '部署目录：%s\n' "$DEPLOY_ROOT"
   printf '当前版本：%s\n' "$(current_version || true)"
+  show_deployment_progress
   if deployment_complete; then
     printf '部署状态：已完成\n'
   else
-    printf '部署状态：尚未完成，可选择“首次部署”继续\n'
+    printf '部署状态：尚未完成，可选择“开始/继续部署”继续\n'
   fi
   if [ -n "$(current_version)" ] \
     && [ -s "$DEPLOY_ROOT/config/deployment.env" ] \
@@ -1128,8 +1347,14 @@ show_help() {
 数据固定保存在同级 XIANYU_DATA。官方依赖镜像支持在线拉取或本地归档导入。
 
 可选参数：
-  --help    显示帮助
-  --check   检查脚本语法和版本包命名，不改动系统
+  --deploy   开始或继续部署
+  --start    启动服务
+  --stop     停止服务
+  --restart  重启服务
+  --status   查看部署和容器状态
+  --doctor   检查 Docker 平台、镜像和部署阶段
+  --check    检查脚本语法和版本包命名，不改动系统
+  --help     显示帮助
 EOF
 }
 
@@ -1154,32 +1379,25 @@ main_menu() {
     printf ' 闲鱼管理平台 · Docker 部署\n'
     printf ' 数据目录：%s\n' "$DEPLOY_ROOT"
     printf ' 当前版本：%s\n' "$(current_version || true)"
+    show_deployment_progress
     printf '========================================\n'
-    printf '  1) 首次部署\n'
-    printf '  2) 启动服务\n'
-    printf '  3) 停止服务\n'
-    printf '  4) 重启服务\n'
-    printf '  5) 查看状态\n'
-    printf '  6) 查看日志\n'
-    printf '  7) 安装/升级版本包\n'
-    printf '  8) 只导入版本包\n'
-    printf '  9) 修改端口和 URL 配置\n'
-    printf ' 10) 证书管理\n'
-    printf ' 11) 官方依赖镜像管理\n'
+    printf '  1) 开始/继续部署\n'
+    printf '  2) 服务管理\n'
+    printf '  3) 版本管理\n'
+    printf '  4) 修改端口和 URL 配置\n'
+    printf '  5) 证书管理\n'
+    printf '  6) 官方依赖镜像管理\n'
+    printf '  7) 部署诊断\n'
     printf '  0) 退出\n'
     read -r -p '请选择: ' choice
     case "$choice" in
-      1) first_deployment ;;
-      2) start_stack ;;
-      3) stop_stack ;;
-      4) compose restart && success "服务已重启" ;;
-      5) show_status ;;
-      6) compose logs -f --tail=200 ;;
-      7) ensure_layout; upgrade_stack ;;
-      8) ensure_layout; import_only ;;
-      9) ensure_layout; configure_deployment ;;
-      10) certificate_management ;;
-      11) ensure_layout; dependency_image_management ;;
+      1) run_menu_action first_deployment ;;
+      2) service_management ;;
+      3) version_management ;;
+      4) run_menu_action configure_deployment_action ;;
+      5) run_menu_action certificate_management ;;
+      6) run_menu_action dependency_image_action ;;
+      7) run_menu_action deployment_diagnostics ;;
       0) exit 0 ;;
       *) warn "选择无效" ;;
     esac
@@ -1190,9 +1408,12 @@ main_menu() {
 case "${1:-}" in
   --help|-h) show_help; exit 0 ;;
   --check) self_check; exit 0 ;;
-  '') ;;
+  '') ensure_dependencies; main_menu ;;
+  --deploy) ensure_dependencies; first_deployment ;;
+  --start) ensure_dependencies; start_stack ;;
+  --stop) ensure_dependencies; stop_stack ;;
+  --restart) ensure_dependencies; restart_stack ;;
+  --status) ensure_dependencies; show_status ;;
+  --doctor) ensure_dependencies; deployment_diagnostics ;;
   *) show_help; exit 2 ;;
 esac
-
-ensure_dependencies
-main_menu

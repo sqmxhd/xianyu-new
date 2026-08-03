@@ -42,7 +42,7 @@ CDP 都不发布宿主机端口。`xianyu-app` 只发布闲鱼平台和 Chatwoot
 Chatwoot 保持官方 Rails/Sidekiq 两容器结构，使用同一个官方镜像，不制作补丁镜像。
 数据库初始化通过 `docker compose run --rm` 临时执行，不留下初始化容器。
 
-## 首次部署
+## 开始或继续部署
 
 目标主机需要 Linux amd64、Docker Engine、Docker Compose v2 和 OpenSSL。将镜像
 压缩包、校验文件、`开始部署.sh` 与 `compose.all.yml` 放在同一目录：
@@ -56,9 +56,20 @@ chmod +x 开始部署.sh
 `XIANYU_DATA`，配置两个 HTTPS 端口和 URL，生成密钥，建立两个 PostgreSQL 数据库，
 执行 Chatwoot 官方初始化，最后启动并检查 5 个常驻容器。
 
-首次部署采用可恢复的分阶段流程。URL 输入、依赖镜像下载、证书生成或数据库初始化
-中途失败时，再次选择“首次部署”会复用已经导入的版本及现有配置，从失败阶段继续，
-不会覆盖证书、密钥或数据。在线依赖镜像拉取会自动重试 3 次。
+部署采用可恢复的分阶段流程。菜单会显示项目镜像、配置、依赖镜像、密钥、证书和
+服务状态，并提示下一项建议操作。URL 输入、依赖镜像下载、证书生成或数据库初始化
+中途失败时，再次选择“开始/继续部署”会从失败阶段继续，不会覆盖证书、密钥或
+数据。单个依赖镜像准备成功后即可独立复用，后续镜像失败不会导致它被重复处理。
+菜单操作失败后会返回主菜单，不再直接关闭整个部署脚本。
+
+脚本也支持直接执行常用动作：
+
+```bash
+./开始部署.sh --deploy   # 开始或继续部署
+./开始部署.sh --doctor   # 查看 Docker 平台、镜像和部署阶段
+./开始部署.sh --status   # 查看部署及容器状态
+./开始部署.sh --start    # 启动服务
+```
 
 共享 PostgreSQL 启动时预加载 `pg_stat_statements`。脚本以数据库超级用户在
 `chatwoot` 库中预先创建 `pg_stat_statements`、`pg_trgm`、`pgcrypto` 和 `vector`，
@@ -77,8 +88,10 @@ redis:7.4-alpine
 pgvector/pgvector:pg16
 ```
 
-在线模式执行 `docker pull`。本地模式选择通过 `docker save` 导出的 `.tar` 或
-`.tar.gz` 并执行 `docker load`，然后统一标记为：
+在线模式固定执行 `docker pull --platform linux/amd64`，不受 Docker 默认平台或
+当前 context 的隐式架构选择影响，并自动重试 3 次。本地模式选择通过 `docker save`
+导出的 `.tar` 或 `.tar.gz` 并执行 `docker load`。两种模式都会校验完整的
+`linux/amd64` 平台；失败时同时显示期望平台和实际平台。随后统一标记为：
 
 ```text
 xianyu-local/chatwoot:4.16.0
