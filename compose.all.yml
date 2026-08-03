@@ -166,7 +166,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: [CMD, python, /app/tools/container_entry.py, app-health]
+      test: [CMD, python, -m, tools.container_entry, app-health]
       interval: 10s
       timeout: 5s
       retries: 12

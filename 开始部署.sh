@@ -39,7 +39,34 @@ require_command() {
 }
 
 image_platform() {
-  docker image inspect --format '{{.Os}}/{{.Architecture}}' "$1" 2>/dev/null
+  local reference="$1" direct
+  direct="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' \
+    "$reference" 2>/dev/null || true)"
+  if [ -n "$direct" ] && [ "$direct" != / ]; then
+    printf '%s\n' "$direct"
+    return 0
+  fi
+  docker image ls --tree "$reference" 2>/dev/null |
+    sed -E $'s/\033\\[[0-9;]*[mK]//g' |
+    awk '$2 ~ /^linux\// && $5 != "0B" {print $2}' |
+    LC_ALL=C sort -u |
+    paste -sd, -
+}
+
+image_has_platform() {
+  local reference="$1" expected="$2" direct
+  direct="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' \
+    "$reference" 2>/dev/null || true)"
+  if [ -n "$direct" ] && [ "$direct" != / ]; then
+    [ "$direct" = "$expected" ]
+    return
+  fi
+  docker image ls --tree "$reference" 2>/dev/null |
+    sed -E $'s/\033\\[[0-9;]*[mK]//g' |
+    awk -v expected="$expected" '
+      $2 == expected && $5 != "0B" {found = 1}
+      END {exit found ? 0 : 1}
+    '
 }
 
 validate_image_platform() {
@@ -47,14 +74,14 @@ validate_image_platform() {
   docker image inspect "$reference" >/dev/null 2>&1 ||
     fail "$label 镜像不存在：$reference"
   actual="$(image_platform "$reference" || true)"
-  [ "$actual" = "$TARGET_PLATFORM" ] ||
+  image_has_platform "$reference" "$TARGET_PLATFORM" ||
     fail "$label 镜像平台不匹配：期望 $TARGET_PLATFORM，实际 ${actual:-无法识别}（$reference）"
 }
 
 image_ready() {
   local reference="$1"
   docker image inspect "$reference" >/dev/null 2>&1 &&
-    [ "$(image_platform "$reference" || true)" = "$TARGET_PLATFORM" ]
+    image_has_platform "$reference" "$TARGET_PLATFORM"
 }
 
 ensure_dependencies() {

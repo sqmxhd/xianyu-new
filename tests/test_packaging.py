@@ -113,6 +113,10 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn('Path("/data/contact-avatars")', entrypoint)
         self.assertIn('if role == "app"', entrypoint)
         self.assertIn("run_application_stack", entrypoint)
+        self.assertIn(
+            "test: [CMD, python, -m, tools.container_entry, app-health]",
+            (root / "compose.all.yml").read_text(encoding="utf-8"),
+        )
 
     def test_container_deployment_has_no_fixed_public_origin(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -263,6 +267,59 @@ class PackagingContractTests(unittest.TestCase):
         self.assertFalse(
             (root / "tools" / "package" / "BundleImage.Dockerfile").exists()
         )
+
+    def test_deployment_accepts_amd64_from_containerd_multi_platform_index(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        deploy = (root / "开始部署.sh").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            deploy_root = Path(temporary)
+            fake_bin = deploy_root / "fake-bin"
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text(
+                """#!/bin/sh
+case "$1:$2" in
+  image:inspect)
+    case "$*" in
+      *--format*) printf '/\\n' ;;
+    esac
+    exit 0
+    ;;
+  image:ls)
+    cat <<'EOF'
+IMAGE                    ID             DISK USAGE   CONTENT SIZE
+index:test               a36250871de0   28.2MB       28.2MB
+├─ linux/amd64           84a355869251   28.2MB       28.2MB
+└─ linux/arm64           386f17b2364a   0B           0B
+EOF
+    exit 0
+    ;;
+esac
+exit 1
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            function_block = "info() {" + deploy.split("info() {", 1)[1]
+            function_block = function_block.split('\ncase "${1:-}"', 1)[0]
+            harness = (
+                "set -Eeuo pipefail\n"
+                'TARGET_PLATFORM="linux/amd64"\n'
+                f"{function_block}\n"
+                'validate_image_platform "index:test" "测试"\n'
+                'image_ready "index:test"\n'
+                'image_platform "index:test"\n'
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                cwd=deploy_root,
+                env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "linux/amd64")
 
     def test_deployment_upgrade_defaults_to_latest_version_package(self) -> None:
         root = Path(__file__).resolve().parents[1]
