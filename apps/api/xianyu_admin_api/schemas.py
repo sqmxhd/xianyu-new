@@ -2062,6 +2062,7 @@ class ChatwootConfigPayload(BaseModel):
     offline_alert_delay_seconds: int = 120
     base_url: str
     chatwoot_account_id: int | None = None
+    api_access_token: str | None = None
     has_api_access_token: bool = False
     full_outbound_sync_enabled: bool = False
     account_grouping_enabled: bool = False
@@ -2070,6 +2071,16 @@ class ChatwootConfigPayload(BaseModel):
     callback_url: str
     status: str = "disabled"
     last_error: str | None = None
+    credential_status: str = "unconfigured"
+    credential_error: str | None = None
+    push_status: str = "unknown"
+    push_error: str | None = None
+    webhook_status: str = "unknown"
+    webhook_error: str | None = None
+    inbox_status: str = "unknown"
+    inbox_error: str | None = None
+    label_status: str = "unknown"
+    label_error: str | None = None
     last_webhook_at: datetime | None = None
     last_push_at: datetime | None = None
     created_at: datetime

@@ -175,6 +175,7 @@ def _initialize_schema() -> None:
     Base.metadata.create_all(bind=engine)
     added_columns = _apply_lightweight_migrations(engine)
     _drop_legacy_chatwoot_config_columns(engine)
+    _normalize_chatwoot_health_columns(engine)
     _ensure_chatwoot_platform_indexes(engine)
     _normalize_account_sort_order(engine)
     _migrate_auto_reply_ownership(engine)
@@ -238,6 +239,44 @@ def _drop_legacy_chatwoot_config_columns(target_engine: Engine) -> None:
                 connection.execute(
                     text(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
                 )
+
+
+def _normalize_chatwoot_health_columns(target_engine: Engine) -> None:
+    """Initialize component health when upgrading an existing platform row."""
+
+    table_name = "xianyu_chatwoot_config"
+    if table_name not in inspect(target_engine).get_table_names():
+        return
+    columns = {
+        column["name"] for column in inspect(target_engine).get_columns(table_name)
+    }
+    required = {
+        "api_access_token_encrypted",
+        "credential_status",
+        "credential_error",
+        "label_status",
+        "label_error",
+        "status",
+        "last_error",
+    }
+    if not required.issubset(columns):
+        return
+    with target_engine.begin() as connection:
+        connection.execute(
+            text(
+                f"UPDATE {table_name} SET credential_status = 'ready', "
+                "credential_error = NULL WHERE api_access_token_encrypted IS NOT NULL "
+                "AND api_access_token_encrypted <> '' "
+                "AND credential_status = 'unconfigured'"
+            )
+        )
+        connection.execute(
+            text(
+                f"UPDATE {table_name} SET label_status = 'error', "
+                "label_error = last_error WHERE status = 'degraded' "
+                "AND last_error IS NOT NULL AND label_status = 'unknown'"
+            )
+        )
 
 
 def _ensure_chatwoot_platform_indexes(target_engine: Engine) -> None:

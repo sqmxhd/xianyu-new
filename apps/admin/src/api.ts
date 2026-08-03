@@ -203,6 +203,13 @@ export function testChatwootConfig(): Promise<ChatwootTestResult> {
   });
 }
 
+export function resyncChatwootAccountStructure(): Promise<ChatwootTestResult> {
+  return request<ChatwootTestResult>(
+    "/api/settings/message-services/chatwoot/resync",
+    { method: "POST" }
+  );
+}
+
 export function testChatwootAccountAlerts(): Promise<ChatwootTestResult> {
   return request<ChatwootTestResult>(
     "/api/settings/message-services/chatwoot/account-alert-test",

@@ -210,6 +210,7 @@ import {
   sendImage,
   recallMessage,
   revealAccountCookie,
+  resyncChatwootAccountStructure,
   sendText,
   saveChatwootConfig,
   saveWebNotificationConfig,
@@ -1727,6 +1728,7 @@ export default function App() {
   const [chatwootSaving, setChatwootSaving] = useState(false);
   const [chatwootTesting, setChatwootTesting] = useState(false);
   const [chatwootAlertTesting, setChatwootAlertTesting] = useState(false);
+  const [chatwootResyncing, setChatwootResyncing] = useState(false);
   const [webNotificationConfig, setWebNotificationConfig] =
     useState<WebNotificationConfig | null>(null);
   const [webNotificationLoading, setWebNotificationLoading] = useState(false);
@@ -5484,7 +5486,7 @@ export default function App() {
         account_alerts_enabled: result.account_alerts_enabled,
         offline_alert_delay_seconds: result.offline_alert_delay_seconds,
         base_url: result.base_url,
-        api_access_token: ""
+        api_access_token: result.api_access_token || ""
       });
     } catch (error) {
       message.error(error instanceof Error ? error.message : "加载 Chatwoot 配置失败");
@@ -5574,7 +5576,7 @@ export default function App() {
         account_alerts_enabled: saved.account_alerts_enabled,
         offline_alert_delay_seconds: saved.offline_alert_delay_seconds,
         base_url: saved.base_url,
-        api_access_token: ""
+        api_access_token: saved.api_access_token || ""
       });
       message.success("Chatwoot 配置已保存");
     } catch (error) {
@@ -5611,6 +5613,22 @@ export default function App() {
       await loadChatwootData();
     } finally {
       setChatwootAlertTesting(false);
+    }
+  }
+
+  async function resyncChatwootStructure() {
+    setChatwootResyncing(true);
+    try {
+      const result = await resyncChatwootAccountStructure();
+      message.success(result.message);
+      await loadChatwootData();
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "重新同步 Chatwoot 账户结构失败"
+      );
+      await loadChatwootData();
+    } finally {
+      setChatwootResyncing(false);
     }
   }
 
@@ -13089,6 +13107,34 @@ export default function App() {
   }
 
   function renderMessageServicesPage() {
+    const chatwootStatusLabels: Record<string, string> = {
+      disabled: "已停用",
+      ready: "运行正常",
+      online: "运行正常",
+      degraded: "部分功能异常",
+      error: "连接或同步异常"
+    };
+    const healthStatusLabels: Record<string, string> = {
+      unknown: "待检测",
+      unconfigured: "未配置",
+      ready: "正常",
+      error: "异常"
+    };
+    const healthStatusColor = (status: string) =>
+      status === "ready"
+        ? "green"
+        : status === "error" || status === "unconfigured"
+          ? "red"
+          : "default";
+    const chatwootHealth: Array<[string, string, string | null | undefined]> = chatwootConfig
+      ? [
+          ["管理员凭据", chatwootConfig.credential_status, chatwootConfig.credential_error],
+          ["消息推送", chatwootConfig.push_status, chatwootConfig.push_error],
+          ["Webhook 回调", chatwootConfig.webhook_status, chatwootConfig.webhook_error],
+          ["Inbox 管理", chatwootConfig.inbox_status, chatwootConfig.inbox_error],
+          ["标签同步", chatwootConfig.label_status, chatwootConfig.label_error]
+        ]
+      : [];
     const chatwootStatusColor =
       chatwootConfig?.status === "error"
         ? "red"
@@ -13109,7 +13155,9 @@ export default function App() {
                   <Tag color={chatwootConfig.enabled ? "green" : "default"}>
                     {chatwootConfig.enabled ? "已启用" : "已停用"}
                   </Tag>
-                  <Tag color={chatwootStatusColor}>{chatwootConfig.status}</Tag>
+                  <Tag color={chatwootStatusColor}>
+                    {chatwootStatusLabels[chatwootConfig.status] || chatwootConfig.status}
+                  </Tag>
                 </>
               ) : (
                 <Tag color="orange">尚未配置</Tag>
@@ -13181,8 +13229,8 @@ export default function App() {
                 </Form.Item>
                 <Form.Item label="当前链路">
                   <Space size={6} wrap className="chatwoot-config-status">
-                    <Tag color={chatwootConfig?.has_api_access_token ? "green" : "red"}>
-                      服务账号 {chatwootConfig?.has_api_access_token ? "已配置" : "未配置"}
+                    <Tag color={healthStatusColor(chatwootConfig?.credential_status || "unknown")}>
+                      凭据 {healthStatusLabels[chatwootConfig?.credential_status || "unknown"]}
                     </Tag>
                     <Tag color={chatwootConfig?.full_outbound_sync_enabled ? "green" : "orange"}>
                       {chatwootConfig?.full_outbound_sync_enabled ? "完整双向同步" : "基础链路"}
@@ -13200,7 +13248,7 @@ export default function App() {
             <div className="message-service-section">
               <div className="message-service-section-heading">
                 <Text strong>连接参数</Text>
-                <Text type="secondary">只需填写 Chatwoot 地址，其余信息由服务端自动识别</Text>
+                <Text type="secondary">填写 Chatwoot 地址和管理员 Access Token，其余信息自动识别</Text>
               </div>
               <div className="chatwoot-config-grid message-service-fields">
                 <Form.Item
@@ -13209,6 +13257,14 @@ export default function App() {
                   rules={[{ required: true, message: "请输入 Chatwoot 地址" }]}
                 >
                   <Input placeholder="https://192.168.201.2" />
+                </Form.Item>
+                <Form.Item
+                  name="api_access_token"
+                  label="Chatwoot 管理员 Access Token"
+                  extra="从 Chatwoot 个人资料页复制；仅本平台管理员可读取，数据库中加密保存。"
+                  rules={[{ required: true, message: "请输入 Chatwoot 管理员 Access Token" }]}
+                >
+                  <Input autoComplete="off" />
                 </Form.Item>
                 <Form.Item label="自动识别的 Chatwoot 账户 ID">
                   <div className="message-service-readonly">
@@ -13239,19 +13295,19 @@ export default function App() {
 
             <div className="message-service-section">
               <div className="message-service-section-heading">
-                <Text strong>安全凭据</Text>
-                <Text type="secondary">令牌在服务端加密存储，留空保留已有值</Text>
+                <Text strong>链路健康</Text>
+                <Text type="secondary">分项记录运行结果，避免不同任务互相覆盖状态</Text>
               </div>
-              <div className="chatwoot-config-grid message-service-fields">
-                <div className="message-service-credential chatwoot-config-span-2">
-                  <Form.Item
-                    name="api_access_token"
-                    label="专用服务账号令牌"
-                    extra="从 Chatwoot 个人资料页复制 Access Token；账号必须具有 administrator 权限。首次配置必填，后续留空保留。"
-                  >
-                    <Input.Password autoComplete="new-password" />
-                  </Form.Item>
-                </div>
+              <div className="message-service-runtime-grid">
+                {chatwootHealth.map(([label, status, error]) => (
+                  <div key={label}>
+                    <Text type="secondary">{label}</Text>
+                    <Tag color={healthStatusColor(status)}>
+                      {healthStatusLabels[status] || status}
+                    </Tag>
+                    {error ? <Text type="danger">{error}</Text> : null}
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -13301,6 +13357,13 @@ export default function App() {
                 onClick={() => void runChatwootAccountAlertTest()}
               >
                 测试账户提醒
+              </Button>
+              <Button
+                loading={chatwootResyncing}
+                disabled={!chatwootConfig?.enabled}
+                onClick={() => void resyncChatwootStructure()}
+              >
+                重新同步账户结构
               </Button>
             </div>
           </Form>

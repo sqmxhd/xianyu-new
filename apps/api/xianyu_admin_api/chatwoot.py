@@ -81,6 +81,38 @@ MAX_AUDIO_INPUT_BYTES = 20 * 1024 * 1024
 MAX_AUDIO_REDIRECTS = 3
 XIANYU_AUDIO_HOST_SUFFIXES = (".aliyuncs.com",)
 CHATWOOT_CONFIG_ID = "default"
+
+_CHATWOOT_HEALTH_COMPONENTS = {
+    "credential",
+    "push",
+    "webhook",
+    "inbox",
+    "label",
+}
+
+
+def _chatwoot_overall_status(row: ChatwootConfigORM) -> str:
+    if not row.enabled:
+        return "disabled"
+    if row.credential_status != "ready":
+        return "error"
+    if any(
+        getattr(row, f"{component}_status") == "error"
+        for component in ("push", "webhook", "inbox")
+    ):
+        return "error"
+    if row.label_status == "error":
+        return "degraded"
+    return "ready"
+
+
+def _chatwoot_overall_error(row: ChatwootConfigORM) -> str | None:
+    for component in ("credential", "push", "webhook", "inbox", "label"):
+        if getattr(row, f"{component}_status") == "error":
+            error = _string(getattr(row, f"{component}_error"))
+            if error:
+                return error
+    return None
 CHATWOOT_CALLBACK_PATH = "/api/integrations/chatwoot/webhook"
 CHATWOOT_INBOX_LOCK_TO_SINGLE_CONVERSATION = False
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -1260,16 +1292,20 @@ class ChatwootRepository:
             message_pk,
         )
 
-    async def set_config_health(
+    async def set_component_health(
         self,
         *,
+        component: str,
         status: str,
         error: str | None = None,
         pushed: bool = False,
         webhook: bool = False,
     ) -> None:
+        if component not in _CHATWOOT_HEALTH_COMPONENTS:
+            raise ValueError(f"unsupported Chatwoot health component: {component}")
         await run_db_blocking(
-            self._set_config_health_sync,
+            self._set_component_health_sync,
+            component,
             status,
             error,
             pushed,
@@ -1297,6 +1333,14 @@ class ChatwootRepository:
     ) -> ChatwootConfigPayload:
         api_access_token = decrypt_sensitive(row.api_access_token_encrypted)
         has_token = bool(api_access_token)
+        credential_status = row.credential_status if has_token else "unconfigured"
+        credential_error = row.credential_error
+        overall_status = _chatwoot_overall_status(row)
+        overall_error = _chatwoot_overall_error(row)
+        if row.enabled and not has_token:
+            overall_status = "error"
+            credential_error = credential_error or "Chatwoot 管理员 Access Token 未配置或无法解密"
+            overall_error = credential_error
         return ChatwootConfigPayload(
             config_id=row.config_id,
             enabled=row.enabled,
@@ -1304,6 +1348,7 @@ class ChatwootRepository:
             offline_alert_delay_seconds=row.offline_alert_delay_seconds,
             base_url=row.base_url,
             chatwoot_account_id=row.chatwoot_account_id,
+            api_access_token=api_access_token,
             has_api_access_token=has_token,
             full_outbound_sync_enabled=bool(has_token and row.chatwoot_account_id),
             account_grouping_enabled=bool(
@@ -1314,8 +1359,18 @@ class ChatwootRepository:
             managed_inbox_count=managed_inbox_count,
             callback_path=CHATWOOT_CALLBACK_PATH,
             callback_url=_chatwoot_callback_url(),
-            status=row.status,
-            last_error=row.last_error,
+            status=overall_status,
+            last_error=overall_error,
+            credential_status=credential_status,
+            credential_error=credential_error,
+            push_status=row.push_status,
+            push_error=row.push_error,
+            webhook_status=row.webhook_status,
+            webhook_error=row.webhook_error,
+            inbox_status=row.inbox_status,
+            inbox_error=row.inbox_error,
+            label_status=row.label_status,
+            label_error=row.label_error,
             last_webhook_at=row.last_webhook_at,
             last_push_at=row.last_push_at,
             created_at=row.created_at,
@@ -1530,9 +1585,10 @@ class ChatwootRepository:
     ) -> ChatwootConfigPayload:
         with self._session_factory() as session:
             row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
+            connection_changed = row is None
             if row is None:
                 if not payload.api_access_token:
-                    raise ValueError("首次配置必须填写 Chatwoot 专用服务账号令牌")
+                    raise ValueError("首次配置必须填写 Chatwoot 管理员 Access Token")
                 row = ChatwootConfigORM(
                     config_id=CHATWOOT_CONFIG_ID,
                     base_url=payload.base_url,
@@ -1542,6 +1598,15 @@ class ChatwootRepository:
                     created_at=utcnow(),
                 )
                 session.add(row)
+            else:
+                connection_changed = bool(
+                    row.base_url.rstrip("/") != payload.base_url.rstrip("/")
+                    or (
+                        payload.api_access_token
+                        and payload.api_access_token
+                        != decrypt_sensitive(row.api_access_token_encrypted)
+                    )
+                )
             row.enabled = payload.enabled
             row.account_alerts_enabled = payload.account_alerts_enabled
             row.offline_alert_delay_seconds = payload.offline_alert_delay_seconds
@@ -1549,8 +1614,14 @@ class ChatwootRepository:
             row.chatwoot_account_id = chatwoot_account_id
             if payload.api_access_token:
                 row.api_access_token_encrypted = encrypt_sensitive(payload.api_access_token)
-            row.status = "ready" if payload.enabled else "disabled"
-            row.last_error = None
+            row.credential_status = "ready"
+            row.credential_error = None
+            if connection_changed:
+                for component in ("push", "webhook", "inbox", "label"):
+                    setattr(row, f"{component}_status", "unknown")
+                    setattr(row, f"{component}_error", None)
+            row.status = _chatwoot_overall_status(row)
+            row.last_error = _chatwoot_overall_error(row)
             row.updated_at = utcnow()
             session.commit()
             managed_inbox_count = len(
@@ -2117,8 +2188,9 @@ class ChatwootRepository:
             )
             return self._message_map_dict(row) if row else None
 
-    def _set_config_health_sync(
+    def _set_component_health_sync(
         self,
+        component: str,
         status: str,
         error: str | None,
         pushed: bool,
@@ -2128,8 +2200,10 @@ class ChatwootRepository:
             row = session.get(ChatwootConfigORM, CHATWOOT_CONFIG_ID)
             if row is None:
                 return
-            row.status = status
-            row.last_error = error
+            setattr(row, f"{component}_status", status)
+            setattr(row, f"{component}_error", error)
+            row.status = _chatwoot_overall_status(row)
+            row.last_error = _chatwoot_overall_error(row)
             now = utcnow()
             if pushed:
                 row.last_push_at = now
@@ -2576,7 +2650,7 @@ async def test_chatwoot_config(
     try:
         token = _string(config.get("api_access_token"))
         if not token:
-            raise ChatwootIntegrationError("Chatwoot 专用服务账号令牌未配置")
+            raise ChatwootIntegrationError("Chatwoot 管理员 Access Token 未配置")
         status_code, profile_body = await run_external_blocking(
             _chatwoot_request,
             "GET",
@@ -2590,12 +2664,17 @@ async def test_chatwoot_config(
                 "Chatwoot 服务账号所属账户已变化，请重新保存配置"
             )
     except Exception as exc:
-        await repository.set_config_health(
+        await repository.set_component_health(
+            component="credential",
             status="error",
             error=str(exc)[:1000],
         )
         return ChatwootTestResultPayload(success=False, message=str(exc))
-    await repository.set_config_health(status="ready", error=None)
+    await repository.set_component_health(
+        component="credential",
+        status="ready",
+        error=None,
+    )
     return ChatwootTestResultPayload(
         success=True,
         message="Chatwoot 管理员服务账号连接正常",
@@ -2633,7 +2712,7 @@ async def save_chatwoot_config(
     if not token and existing is not None:
         token = _string(existing.get("api_access_token"))
     if not token:
-        raise ChatwootIntegrationError("首次配置必须填写 Chatwoot 专用服务账号令牌")
+        raise ChatwootIntegrationError("首次配置必须填写 Chatwoot 管理员 Access Token")
     _, profile_body = await run_external_blocking(
         _chatwoot_request,
         "GET",
@@ -2710,7 +2789,7 @@ async def _ensure_account_label(
     platform_name = _platform_name(platform)
     if not token or not chatwoot_account_id or not account_id:
         raise ChatwootIntegrationError(
-            "账号标签需要 Chatwoot 平台账户 ID 与专用服务账号令牌"
+            "账号标签需要 Chatwoot 平台账户 ID 与管理员 Access Token"
         )
     desired_title = _account_label_title(account_name, account_id, platform)
     labels_url = (
@@ -3026,7 +3105,7 @@ async def _sync_remote_conversation_metadata(
     chatwoot_account_id = config.get("chatwoot_account_id")
     if not token or not chatwoot_account_id:
         raise ChatwootIntegrationError(
-            "会话账号标签需要 Chatwoot 平台账户 ID 与专用服务账号令牌"
+            "会话账号标签需要 Chatwoot 平台账户 ID 与管理员 Access Token"
         )
     base = (
         f"{config['base_url']}/api/v1/accounts/{chatwoot_account_id}"
@@ -3682,7 +3761,8 @@ async def execute_local_message_task(
         origin="xianyu",
         state="synced",
     )
-    await repository.set_config_health(
+    await repository.set_component_health(
+        component="push",
         status="ready",
         error=None,
         pushed=True,
@@ -4331,14 +4411,16 @@ async def execute_webhook_task(
             result["read_synced_users"] = len(read_events)
     except Exception as exc:
         await repository.finish_webhook(delivery_id, status="failed", error=str(exc)[:1000])
-        await repository.set_config_health(
+        await repository.set_component_health(
+            component="webhook",
             status="error",
             error=str(exc)[:1000],
             webhook=True,
         )
         raise
     await repository.finish_webhook(delivery_id, status="success")
-    await repository.set_config_health(
+    await repository.set_component_health(
+        component="webhook",
         status="ready",
         error=None,
         webhook=True,
@@ -4368,11 +4450,12 @@ async def execute_account_status_task(
     } else "connecting"
     updated_conversations = 0
     if not config["api_access_token"] or not config["chatwoot_account_id"]:
-        await repository.set_config_health(
-            status="degraded",
+        await repository.set_component_health(
+            component="credential",
+            status="error",
             error=(
                 "账号状态回写需要配置 Chatwoot 平台账户 ID "
-                "与专用服务账号令牌"
+                "与管理员 Access Token"
             ),
         )
         return {
@@ -4424,15 +4507,21 @@ async def execute_account_status_task(
                 stale_conversations += 1
                 continue
             raise
-    await repository.set_config_health(
-        status="degraded" if config.get("label_error") else "ready",
+    await repository.set_component_health(
+        component="inbox",
+        status="ready",
+        error=None,
+        pushed=updated_conversations > 0,
+    )
+    await repository.set_component_health(
+        component="label",
+        status="error" if config.get("label_error") else "ready",
         error=(
-            "账号 Inbox 与状态属性已同步；Chatwoot 标签接口异常，标签暂未同步："
+            "Chatwoot 标签接口异常，标签暂未同步："
             f"{_string(config.get('label_error'))[:300]}"
             if config.get("label_error")
             else None
         ),
-        pushed=updated_conversations > 0,
     )
     return {
         "ok": True,
@@ -4644,7 +4733,7 @@ async def execute_account_alert_task(
             }
     if not config.get("api_access_token") or not config.get("chatwoot_account_id"):
         raise ChatwootIntegrationError(
-            "账户状态提醒需要 Chatwoot 平台账户 ID 与专用服务账号令牌"
+            "账户状态提醒需要 Chatwoot 平台账户 ID 与管理员 Access Token"
         )
     source_id, conversation_id = await _ensure_account_alert_conversation(
         repository,
@@ -4684,7 +4773,12 @@ async def execute_account_alert_task(
             account_id=account_id,
             state=state,
         )
-    await repository.set_config_health(status="ready", error=None, pushed=True)
+    await repository.set_component_health(
+        component="push",
+        status="ready",
+        error=None,
+        pushed=True,
+    )
     message_body = _json_object(body)
     return {
         "ok": True,
@@ -4809,25 +4903,36 @@ async def execute_account_metadata_task(
             )
     if errors:
         error = "; ".join(errors[:5])
-        await repository.set_config_health(status="error", error=error)
+        await repository.set_component_health(
+            component="inbox",
+            status="error",
+            error=error,
+        )
         raise ChatwootIntegrationError(error)
     if token_ready:
-        await repository.set_config_health(
-            status="degraded" if config.get("label_error") else "ready",
+        await repository.set_component_health(
+            component="inbox",
+            status="ready",
+            error=None,
+            pushed=True,
+        )
+        await repository.set_component_health(
+            component="label",
+            status="error" if config.get("label_error") else "ready",
             error=(
-                "账号 Inbox 与自定义属性已同步；Chatwoot 标签接口异常，标签暂未同步："
+                "Chatwoot 标签接口异常，标签暂未同步："
                 f"{_string(config.get('label_error'))[:300]}"
                 if config.get("label_error")
                 else None
             ),
-            pushed=True,
         )
     else:
-        await repository.set_config_health(
-            status="degraded",
+        await repository.set_component_health(
+            component="credential",
+            status="error",
             error=(
                 "账号名称已同步；会话标签、账号分组和状态回写需要配置 "
-                "Chatwoot 平台账户 ID 与专用服务账号令牌"
+                "Chatwoot 平台账户 ID 与管理员 Access Token"
             ),
             pushed=contact_updates > 0,
         )

@@ -571,7 +571,7 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(call.kwargs["files"][0][1][0], "original.jpg")
 
-    async def test_service_account_token_is_encrypted_and_redacted(self) -> None:
+    async def test_service_account_token_is_encrypted_and_exposed_to_admin(self) -> None:
         config = await self.repository.upsert_config(
             ChatwootConfigUpdatePayload(
                 enabled=True,
@@ -587,11 +587,46 @@ class ChatwootBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config.account_alerts_enabled)
         self.assertEqual(config.offline_alert_delay_seconds, 180)
         self.assertFalse(config.account_grouping_enabled)
-        self.assertNotIn("api_access_token", config.model_dump())
+        self.assertEqual(config.api_access_token, "service-account-token")
         with self.session_factory() as session:
             row = session.scalar(select(ChatwootConfigORM))
             assert row is not None
             self.assertNotEqual(row.api_access_token_encrypted, "service-account-token")
+
+    async def test_component_health_is_aggregated_without_last_writer_loss(self) -> None:
+        await self.repository.upsert_config(
+            ChatwootConfigUpdatePayload(
+                enabled=True,
+                base_url="http://chatwoot.internal:3000",
+                api_access_token="service-account-token",
+            )
+        )
+        await self.repository.set_component_health(
+            component="label",
+            status="error",
+            error="标签接口异常",
+        )
+        await self.repository.set_component_health(
+            component="credential",
+            status="ready",
+            error=None,
+        )
+
+        degraded = await self.repository.get_config_payload()
+        assert degraded is not None
+        self.assertEqual(degraded.status, "degraded")
+        self.assertEqual(degraded.label_status, "error")
+        self.assertEqual(degraded.last_error, "标签接口异常")
+
+        await self.repository.set_component_health(
+            component="label",
+            status="ready",
+            error=None,
+        )
+        ready = await self.repository.get_config_payload()
+        assert ready is not None
+        self.assertEqual(ready.status, "ready")
+        self.assertIsNone(ready.last_error)
 
     async def test_save_config_detects_administrator_account(self) -> None:
         with patch(

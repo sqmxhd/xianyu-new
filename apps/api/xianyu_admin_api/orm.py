@@ -1784,6 +1784,26 @@ class ChatwootConfigORM(Base):
     base_url: Mapped[str] = mapped_column(String(1000), nullable=False)
     chatwoot_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     api_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unconfigured", server_default="unconfigured"
+    )
+    credential_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    push_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown"
+    )
+    push_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown"
+    )
+    webhook_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inbox_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown"
+    )
+    inbox_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown"
+    )
+    label_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="disabled", server_default="disabled"
     )

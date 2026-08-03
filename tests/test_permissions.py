@@ -56,6 +56,12 @@ class PermissionTests(unittest.TestCase):
         )
         self.assertFalse(_has_permission(operator, _request("GET", "/api/users")))
         self.assertFalse(_has_permission(operator, _request("GET", "/api/audit-logs")))
+        self.assertFalse(
+            _has_permission(
+                operator,
+                _request("GET", "/api/settings/message-services/chatwoot"),
+            )
+        )
 
     def test_web_notification_playback_is_readable_but_configuration_is_admin_only(self) -> None:
         operator = _user("operator")
@@ -138,6 +144,47 @@ class PermissionTests(unittest.TestCase):
 
 
 class AccountActionGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chatwoot_config_with_plaintext_token_is_not_cached(self) -> None:
+        config = object()
+        response = Response()
+        with patch.object(
+            main.chatwoot_repository,
+            "get_config_payload",
+            AsyncMock(return_value=config),
+        ):
+            result = await main.get_chatwoot_config(response)
+        self.assertIs(result, config)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.headers["pragma"], "no-cache")
+
+    async def test_chatwoot_account_structure_resync_queues_enabled_accounts(self) -> None:
+        enabled = AccountRecord(
+            account_id="account-enabled",
+            platform_display_name="enabled",
+            chat_enabled=True,
+        )
+        disabled = AccountRecord(
+            account_id="account-disabled",
+            platform_display_name="disabled",
+            chat_enabled=False,
+        )
+        enqueue = AsyncMock()
+        with (
+            patch.object(
+                main.store,
+                "list_accounts",
+                AsyncMock(return_value=[enabled, disabled]),
+            ),
+            patch.object(main, "enqueue_account_metadata_sync", enqueue),
+        ):
+            result = await main.resync_chatwoot_account_structure()
+        self.assertTrue(result.success)
+        enqueue.assert_awaited_once_with(
+            main.store,
+            account_id=enabled.account_id,
+            reason="manual-platform-resync",
+        )
+
     async def test_browser_profile_cleanup_is_account_scoped(self) -> None:
         account = AccountRecord(
             account_id="account-1",

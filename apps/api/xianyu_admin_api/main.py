@@ -2494,7 +2494,10 @@ async def clear_web_notification_sound() -> WebNotificationConfigPayload:
     "/api/settings/message-services/chatwoot",
     response_model=ChatwootConfigPayload,
 )
-async def get_chatwoot_config() -> ChatwootConfigPayload:
+async def get_chatwoot_config(response: Response) -> ChatwootConfigPayload:
+    # The payload includes the administrator-only Chatwoot Access Token.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     config = await chatwoot_repository.get_config_payload()
     if config is None:
         raise HTTPException(status_code=404, detail="Chatwoot config not found")
@@ -2540,6 +2543,32 @@ async def test_saved_chatwoot_config() -> ChatwootTestResultPayload:
     if not result.success:
         raise HTTPException(status_code=503, detail=result.message)
     return result
+
+
+@app.post(
+    "/api/settings/message-services/chatwoot/resync",
+    response_model=ChatwootTestResultPayload,
+)
+async def resync_chatwoot_account_structure() -> ChatwootTestResultPayload:
+    queued = 0
+    for account in await store.list_accounts():
+        if not account.chat_enabled:
+            continue
+        await enqueue_account_metadata_sync(
+            store,
+            account_id=account.account_id,
+            reason="manual-platform-resync",
+        )
+        queued += 1
+    if queued == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="没有开启 Chatwoot 的平台账户，无法重新同步账户结构",
+        )
+    return ChatwootTestResultPayload(
+        success=True,
+        message=f"已提交 {queued} 个账户的 Inbox、标签和属性同步任务",
+    )
 
 
 @app.post(

@@ -1576,6 +1576,7 @@ export interface ChatwootConfig {
   offline_alert_delay_seconds: number;
   base_url: string;
   chatwoot_account_id?: number | null;
+  api_access_token?: string | null;
   has_api_access_token: boolean;
   full_outbound_sync_enabled: boolean;
   account_grouping_enabled: boolean;
@@ -1584,6 +1585,16 @@ export interface ChatwootConfig {
   callback_url: string;
   status: string;
   last_error?: string | null;
+  credential_status: string;
+  credential_error?: string | null;
+  push_status: string;
+  push_error?: string | null;
+  webhook_status: string;
+  webhook_error?: string | null;
+  inbox_status: string;
+  inbox_error?: string | null;
+  label_status: string;
+  label_error?: string | null;
   last_webhook_at?: string | null;
   last_push_at?: string | null;
   created_at: string;

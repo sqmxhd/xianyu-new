@@ -14,8 +14,9 @@ API Inbox（例如
 ## 配置项
 
 - Chatwoot 地址：Chatwoot 实例根地址，例如 `http://chatwoot.example:3000`
-- 专用服务账号令牌：从 Chatwoot 个人资料页复制 Access Token；账号必须具有
-  `administrator` 权限。首次配置必填，后续留空会保留已加密存储的令牌
+- Chatwoot 管理员 Access Token：从 Chatwoot 个人资料页复制；账号必须具有
+  `administrator` 权限。令牌在数据库中加密保存，并按管理要求在仅管理员可访问
+  的连接参数页面明文回显；配置查询响应禁止缓存
 - Chatwoot 平台账户 ID：保存时通过 `/api/v1/profile` 自动识别，只读展示
 - Webhook 地址：由 `XIANYU_PUBLIC_BASE_URL` 和固定回调路径自动生成，只读展示
 - Inbox identifier 和 Webhook 签名秘密：创建/读取每个账户的官方 API Inbox 时
@@ -101,8 +102,10 @@ Webhook 载荷中的 `unread_count` 和 `agent_last_seen_at` 快速判断，再�
 创建独立 Inbox 后，系统会确保用于集成的 Chatwoot 管理员账号已加入该 Inbox，
 并将新会话明确分配给该账号，保证其可在官方手机端默认的“我的会话”中看到。如果
 Chatwoot 标签接口异常，系统会将配置标记为降级，但不会回滚或阻断 Inbox 分组、
-消息和自定义属性链路。管理页会以黄色“部分同步异常”显示这种降级，
-并保留 Chatwoot 返回的 HTTP 状态和错误摘要，不再将其表述为整体同步失败。
+消息和自定义属性链路。管理页分别记录管理员凭据、消息推送、Webhook、Inbox 和
+标签健康状态，并以黄色“部分功能异常”显示仅标签失败的降级；某个子链路成功不会
+覆盖其他子链路仍存在的错误。页面提供“重新同步账户结构”操作，用于重试 Inbox、
+标签和自定义属性对账。
 
 图片下载限制为 10 MB。系统使用 `XIANYU_CHATWOOT_CA_BUNDLE` 校验所配置
 Chatwoot 主机的 HTTPS 证书，并为 ActiveStorage 手动处理最多三次重定向。每一跳
