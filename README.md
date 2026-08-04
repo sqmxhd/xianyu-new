@@ -552,3 +552,7 @@ chmod +x ./开始部署.sh
 - 检查平台账户对应 Inbox 和消息通道配置。
 - 检查 WSS 连接、worker 队列和任务结果。
 - 确认桌面端与移动端登录的是同一 Chatwoot 工作区。
+
+
+# 感谢来自上游项目参考
+- https://github.com/cv-cat/XianYuApis
