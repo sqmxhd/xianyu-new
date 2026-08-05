@@ -1,0 +1,265 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      XIANYU_DATABASE_URL: "sqlite:///:memory:"
+      XIANYU_REDIS_URL: "redis://127.0.0.1:6379/15"
+      XIANYU_JWT_SECRET: "test-secret-with-sufficient-length"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            integrations/xianyu_core/requirements.txt
+
+      - name: Set up Node.js for PyExecJS
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20.19.2"
+
+      - name: Install backend dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -r apps/api/requirements.txt \
+            -r integrations/xianyu_core/requirements.txt
+          python -c "import execjs; print(execjs.get().name)"
+
+      - name: Run backend tests
+        run: python -m unittest discover -s tests -v
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20.19.2"
+          cache: npm
+          cache-dependency-path: apps/admin/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix apps/admin ci
+
+      - name: Build frontend
+        run: npm --prefix apps/admin run build
+
+  portability:
+    name: Portability checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Run portability checks
+        run: python tools/package/check_portability.py
+
+  release:
+    name: Docker image and GitHub Release
+    needs:
+      - backend
+      - frontend
+      - portability
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate release tag and derive names
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH; received: $tag" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          registry_image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          local_image="xianyu/xianyu-admin:$version"
+          archive="xianyu-admin-$version-linux-amd64.docker.tar.gz"
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "registry_image=$registry_image"
+            echo "local_image=$local_image"
+            echo "archive=$archive"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and publish linux/amd64 image
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.release.outputs.registry_image }}:${{ steps.release.outputs.version }}
+            ${{ steps.release.outputs.registry_image }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            BUILD_VERSION=${{ steps.release.outputs.version }}
+            BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=release-linux-amd64
+          cache-to: type=gha,mode=max,scope=release-linux-amd64
+          provenance: mode=max
+
+      - name: Generate container provenance attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ${{ steps.release.outputs.registry_image }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Export and validate offline image archive
+        shell: bash
+        env:
+          REGISTRY_IMAGE: ${{ steps.release.outputs.registry_image }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          LOCAL_IMAGE: ${{ steps.release.outputs.local_image }}
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          docker pull --platform linux/amd64 "$REGISTRY_IMAGE@$IMAGE_DIGEST"
+          docker tag "$REGISTRY_IMAGE@$IMAGE_DIGEST" "$LOCAL_IMAGE"
+
+          actual_platform="$(docker image inspect "$LOCAL_IMAGE" --format '{{.Os}}/{{.Architecture}}')"
+          actual_version="$(docker image inspect "$LOCAL_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')"
+          actual_commit="$(docker image inspect "$LOCAL_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          test "$actual_platform" = "linux/amd64"
+          test "$actual_version" = "$RELEASE_VERSION"
+          test "$actual_commit" = "$GITHUB_SHA"
+
+          docker save "$LOCAL_IMAGE" | gzip -6 > "release/$ARCHIVE_NAME.partial"
+          gzip -t "release/$ARCHIVE_NAME.partial"
+          gzip -dc "release/$ARCHIVE_NAME.partial" | tar -tf - >/dev/null
+          mv "release/$ARCHIVE_NAME.partial" "release/$ARCHIVE_NAME"
+
+          archive_size="$(stat -c '%s' "release/$ARCHIVE_NAME")"
+          if (( archive_size >= 2147483648 )); then
+            echo "Release asset exceeds GitHub's 2 GiB per-file limit: $archive_size bytes" >&2
+            exit 1
+          fi
+
+          (
+            cd release
+            sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+          )
+          cp 开始部署.sh compose.all.yml release/
+
+      - name: Create release manifest
+        shell: bash
+        env:
+          REGISTRY_IMAGE: ${{ steps.release.outputs.registry_image }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          archive_sha256="$(awk '{print $1}' "release/$ARCHIVE_NAME.sha256")"
+          archive_size="$(stat -c '%s' "release/$ARCHIVE_NAME")"
+          cat > release/RELEASE-MANIFEST.txt <<EOF
+          project=xianyu-admin
+          version=$RELEASE_VERSION
+          tag=$RELEASE_TAG
+          commit=$GITHUB_SHA
+          platform=linux/amd64
+          registry_image=$REGISTRY_IMAGE:$RELEASE_VERSION
+          registry_digest=$IMAGE_DIGEST
+          archive=$ARCHIVE_NAME
+          archive_size_bytes=$archive_size
+          archive_sha256=$archive_sha256
+          EOF
+
+      - name: Create draft release and upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace immutable assets" >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --title "闲鱼管理平台 v$RELEASE_VERSION" \
+              --generate-notes
+          fi
+
+          gh release upload "$RELEASE_TAG" --clobber \
+            "release/$ARCHIVE_NAME" \
+            "release/$ARCHIVE_NAME.sha256" \
+            "release/开始部署.sh" \
+            "release/compose.all.yml" \
+            "release/RELEASE-MANIFEST.txt"
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest
