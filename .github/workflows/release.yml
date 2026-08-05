@@ -255,7 +255,8 @@ jobs:
             cd release
             sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
           )
-          cp 开始部署.sh compose.all.yml release/
+          install -m 0755 开始部署.sh release/start-deploy.sh
+          cp compose.all.yml release/
 
       - name: Create release manifest
         shell: bash
@@ -308,7 +309,7 @@ jobs:
           gh release upload "$RELEASE_TAG" --clobber \
             "release/$ARCHIVE_NAME" \
             "release/$ARCHIVE_NAME.sha256" \
-            "release/开始部署.sh" \
+            "release/start-deploy.sh#开始部署.sh" \
             "release/compose.all.yml" \
             "release/RELEASE-MANIFEST.txt"
 
