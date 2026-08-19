@@ -1901,7 +1901,7 @@ class ProductImageArchiveUploadPayload(BaseModel):
 
 
 class ProductDraftCreatePayload(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=200)
     description: str = Field(default="", max_length=10000)
     price: str = Field(min_length=1, max_length=64)
     original_price: str | None = Field(default=None, max_length=64)
@@ -1954,7 +1954,7 @@ class ProductDraftCreatePayload(BaseModel):
 
 
 class ProductDraftUpdatePayload(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
+    title: str | None = Field(default=None, max_length=200)
     description: str | None = Field(default=None, max_length=10000)
     price: str | None = Field(default=None, min_length=1, max_length=64)
     original_price: str | None = Field(default=None, max_length=64)
@@ -1970,9 +1970,14 @@ class ProductDraftUpdatePayload(BaseModel):
     location_group_id: str | None = Field(default=None, max_length=64)
     status: ProductDraftStatus | None = None
 
+    @field_validator("title", "description", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @field_validator(
-        "title",
-        "description",
         "price",
         "original_price",
         "category_id",

@@ -214,7 +214,7 @@ from .schemas import (
     XianyuQRBrowserVerificationPayload,
     XianyuQRStatusPayload,
 )
-from .security import create_access_token, verify_access_token
+from .security import access_token_error, create_access_token, verify_access_token
 from .realtime import realtime_broker, relay_cross_process_events
 from .product_publish_service import list_platform_product_locations
 from .product_management_service import (
@@ -608,7 +608,52 @@ AUTH_EXEMPT_PATHS = {
     "/api/auth/client-info",
     "/api/auth/login",
     "/api/auth/bootstrap",
+    "/api/auth/refresh",
+    "/api/auth/logout",
 }
+ADMIN_SESSION_COOKIE = "xianyu_admin_session"
+
+
+def _admin_session_cookie_secure(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    return (
+        request.url.scheme == "https"
+        or forwarded_proto == "https"
+        or settings.public_base_url.lower().startswith("https://")
+    )
+
+
+def _set_admin_session_cookie(
+    request: Request,
+    response: Response,
+    refresh_token: str,
+) -> None:
+    max_age = settings.admin_session_expires_days * 24 * 60 * 60
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        refresh_token,
+        max_age=max_age,
+        expires=max_age,
+        path="/api/auth",
+        secure=_admin_session_cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _clear_admin_session_cookie(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.delete_cookie(
+        ADMIN_SESSION_COOKIE,
+        path="/api/auth",
+        httponly=True,
+        samesite="strict",
+    )
+
+
 ADMIN_ONLY_PREFIXES = (
     "/api/internal",
     "/api/users",
@@ -908,6 +953,7 @@ def resolve_client_access(request: Request) -> ClientAccessPayload:
 @app.middleware("http")
 async def require_jwt(request: Request, call_next):  # type: ignore[no-untyped-def]
     user: UserPayload | None = None
+    auth_error_code = "AUTH_REQUIRED"
     is_chatwoot_webhook = (
         request.method == "POST"
         and request.url.path == "/api/integrations/chatwoot/webhook"
@@ -923,10 +969,37 @@ async def require_jwt(request: Request, call_next):  # type: ignore[no-untyped-d
         if bearer_token:
             token_payload = verify_access_token(bearer_token)
             if token_payload is not None:
-                user = await store.get_user(str(token_payload["sub"]))
+                token_type = token_payload.get("token_type")
+                if token_type == "admin_access" and isinstance(token_payload.get("sid"), str):
+                    user = await store.get_user_for_admin_session(
+                        str(token_payload["sub"]),
+                        str(token_payload["sid"]),
+                    )
+                    if user is None:
+                        auth_error_code = "SESSION_EXPIRED"
+                elif token_type == "internal_service":
+                    user = await store.get_user(str(token_payload["sub"]))
+                else:
+                    auth_error_code = "ACCESS_TOKEN_INVALID"
+            else:
+                auth_error_code = access_token_error(bearer_token)
 
         if user is None or not user.enabled:
-            return JSONResponse(status_code=401, content={"detail": "invalid or missing access token"})
+            messages = {
+                "AUTH_REQUIRED": "请先登录",
+                "ACCESS_TOKEN_EXPIRED": "登录凭据已过期",
+                "ACCESS_TOKEN_INVALID": "登录凭据无效",
+                "SESSION_EXPIRED": "登录会话已过期或已退出",
+            }
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": {
+                        "code": auth_error_code,
+                        "message": messages[auth_error_code],
+                    }
+                },
+            )
         request.state.auth_user = user
         if not _has_permission(user, request):
             client = resolve_client_access(request)
@@ -1084,7 +1157,11 @@ async def auth_client_info(request: Request) -> ClientAccessPayload:
 
 
 @app.post("/api/auth/bootstrap", response_model=AuthTokenPayload, status_code=201)
-async def bootstrap_auth(request: Request, payload: AuthBootstrapPayload) -> AuthTokenPayload:
+async def bootstrap_auth(
+    request: Request,
+    response: Response,
+    payload: AuthBootstrapPayload,
+) -> AuthTokenPayload:
     if await store.count_users() > 0:
         raise HTTPException(status_code=409, detail="admin user already initialized")
     user = await store.create_user(
@@ -1102,12 +1179,30 @@ async def bootstrap_auth(request: Request, payload: AuthBootstrapPayload) -> Aut
         login_source=client.source,
     ) or user
     request.state.audit_actor = user.username
-    token, expires_in = create_access_token(user_id=user.user_id, username=user.username, role=user.role)
+    admin_session = await store.create_admin_session(
+        user.user_id,
+        client_ip=client.ip,
+        login_source=client.source,
+    )
+    if admin_session is None:
+        raise HTTPException(status_code=401, detail="admin session could not be created")
+    session_id, refresh_token = admin_session
+    _set_admin_session_cookie(request, response, refresh_token)
+    token, expires_in = create_access_token(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+        session_id=session_id,
+    )
     return AuthTokenPayload(access_token=token, expires_in=expires_in, user=user)
 
 
 @app.post("/api/auth/login", response_model=AuthTokenPayload)
-async def login(request: Request, payload: AuthLoginPayload) -> AuthTokenPayload:
+async def login(
+    request: Request,
+    response: Response,
+    payload: AuthLoginPayload,
+) -> AuthTokenPayload:
     client = resolve_client_access(request)
     user = await store.authenticate_user(
         payload.username,
@@ -1118,8 +1213,57 @@ async def login(request: Request, payload: AuthLoginPayload) -> AuthTokenPayload
     if user is None:
         raise HTTPException(status_code=401, detail="invalid username or password")
     request.state.audit_actor = user.username
-    token, expires_in = create_access_token(user_id=user.user_id, username=user.username, role=user.role)
+    admin_session = await store.create_admin_session(
+        user.user_id,
+        client_ip=client.ip,
+        login_source=client.source,
+    )
+    if admin_session is None:
+        raise HTTPException(status_code=401, detail="admin session could not be created")
+    session_id, refresh_token = admin_session
+    _set_admin_session_cookie(request, response, refresh_token)
+    token, expires_in = create_access_token(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+        session_id=session_id,
+    )
     return AuthTokenPayload(access_token=token, expires_in=expires_in, user=user)
+
+
+@app.post("/api/auth/refresh", response_model=AuthTokenPayload)
+async def refresh_auth(request: Request, response: Response) -> AuthTokenPayload | Response:
+    refresh_token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    refreshed = await store.refresh_admin_session(refresh_token)
+    if refreshed is None:
+        expired_response = JSONResponse(
+            status_code=401,
+            content={
+                "detail": {
+                    "code": "SESSION_EXPIRED",
+                    "message": "登录会话已过期或已退出",
+                }
+            },
+        )
+        _clear_admin_session_cookie(expired_response)
+        return expired_response
+    user, session_id = refreshed
+    _set_admin_session_cookie(request, response, refresh_token)
+    token, expires_in = create_access_token(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+        session_id=session_id,
+    )
+    return AuthTokenPayload(access_token=token, expires_in=expires_in, user=user)
+
+
+@app.post("/api/auth/logout", status_code=204)
+async def logout_auth(request: Request, response: Response) -> None:
+    refresh_token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    if refresh_token:
+        await store.revoke_admin_session(refresh_token)
+    _clear_admin_session_cookie(response)
 
 
 @app.get("/api/auth/me", response_model=UserPayload)
@@ -4374,6 +4518,20 @@ async def list_product_publish_tasks(
     return await store.list_product_publish_tasks(account_id, limit=limit)
 
 
+@app.get(
+    "/api/accounts/{account_id}/products/publish-tasks/{task_id}/attempts",
+    response_model=list[ProductPublishTaskPayload],
+)
+async def list_product_publish_task_attempts(
+    account_id: str,
+    task_id: str,
+) -> list[ProductPublishTaskPayload]:
+    attempts = await store.list_product_publish_task_attempts(account_id, task_id)
+    if attempts is None:
+        raise HTTPException(status_code=404, detail="product publish task not found")
+    return attempts
+
+
 @app.post(
     "/api/accounts/{account_id}/products/publish-tasks",
     response_model=ProductPublishTaskPayload,
@@ -4516,6 +4674,26 @@ async def retry_product_publish_job(
     return ProductPublishEnqueuePayload(
         publish_task=publish_task,
         background_task=background_task,
+    )
+
+
+@app.delete(
+    "/api/accounts/{account_id}/products/publish-tasks/{task_id}",
+    status_code=204,
+)
+async def hide_product_publish_job(account_id: str, task_id: str) -> None:
+    try:
+        hidden = await store.hide_product_publish_task(account_id, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if hidden is None:
+        raise HTTPException(status_code=404, detail="product publish task not found")
+    await realtime_broker.publish(
+        {
+            "event": "product_publish_task_removed",
+            "account_id": account_id,
+            "data": {"task_id": task_id},
+        }
     )
 
 

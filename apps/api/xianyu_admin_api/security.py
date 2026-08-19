@@ -51,16 +51,26 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-def create_access_token(*, user_id: str, username: str, role: str) -> tuple[str, int]:
-    expires_in = settings.jwt_expires_minutes * 60
+def create_access_token(
+    *,
+    user_id: str,
+    username: str,
+    role: str,
+    session_id: str | None = None,
+) -> tuple[str, int]:
+    expires_in = settings.access_token_expires_minutes * 60
     now = int(time.time())
     payload: dict[str, Any] = {
         "sub": user_id,
         "username": username,
         "role": role,
+        "token_type": "admin_access" if session_id else "internal_service",
         "iat": now,
         "exp": now + expires_in,
+        "jti": secrets.token_hex(16),
     }
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM), expires_in
 
 
@@ -70,3 +80,26 @@ def verify_access_token(token: str) -> dict[str, Any] | None:
     except jwt.PyJWTError:
         return None
     return payload if isinstance(payload.get("sub"), str) else None
+
+
+def access_token_error(token: str) -> str:
+    """Classify an invalid access token without exposing signing details."""
+
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        return "ACCESS_TOKEN_EXPIRED"
+    except jwt.PyJWTError:
+        return "ACCESS_TOKEN_INVALID"
+    if not isinstance(payload.get("sub"), str):
+        return "ACCESS_TOKEN_INVALID"
+    return "ACCESS_TOKEN_INVALID"
+
+
+def hash_admin_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_admin_session_token() -> tuple[str, str]:
+    token = secrets.token_urlsafe(48)
+    return token, hash_admin_session_token(token)

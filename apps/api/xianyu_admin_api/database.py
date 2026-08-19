@@ -186,6 +186,7 @@ def _initialize_schema() -> None:
     _ensure_conversation_indexes(engine)
     _ensure_product_publish_indexes(engine)
     _ensure_product_management_indexes(engine)
+    _backfill_product_publish_retry_visibility(engine)
     _backfill_product_publish_task_assets(engine)
     _backfill_product_published_at(engine)
     _backfill_product_want_metrics(
@@ -963,6 +964,39 @@ def _ensure_product_management_indexes(target_engine: Engine) -> None:
         return
     for index in table.indexes:
         index.create(bind=target_engine, checkfirst=True)
+
+
+def _backfill_product_publish_retry_visibility(target_engine: Engine) -> None:
+    """Hide superseded retry attempts from the product catalog.
+
+    Older releases stored every retry as a visible publish task.  Preserve
+    those rows for audit/history while ensuring only the newest attempt in a
+    retry chain remains in the user-facing catalog.
+    """
+
+    from .orm import ProductPublishTaskORM
+
+    if "xianyu_product_publish_tasks" not in inspect(target_engine).get_table_names():
+        return
+    factory = sessionmaker(bind=target_engine, autoflush=False, expire_on_commit=False, future=True)
+    with factory() as session:
+        retries = (
+            session.query(ProductPublishTaskORM)
+            .filter(ProductPublishTaskORM.retry_of_task_id.is_not(None))
+            .order_by(ProductPublishTaskORM.created_at.asc())
+            .all()
+        )
+        changed = False
+        for retry in retries:
+            source = session.get(ProductPublishTaskORM, retry.retry_of_task_id)
+            if source is None or source.account_id != retry.account_id:
+                continue
+            if source.catalog_hidden_at is None:
+                source.catalog_hidden_at = retry.created_at
+                source.updated_at = retry.created_at
+                changed = True
+        if changed:
+            session.commit()
 
 
 def _backfill_product_published_at(target_engine: Engine) -> None:

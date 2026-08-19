@@ -58,7 +58,8 @@ Docker 项目模式和 ALL 模式使用相同 Compose 项目名，因此不能�
 | `XIANYU_HTTPS_PORT` | `6161` | HTTPS 网关宿主机端口 |
 | `XIANYU_CORS_ORIGINS` | 同源 | 独立前端跨域访问时设置 |
 | `VITE_API_BASE_URL` | 空 | 源码前端直接访问独立 API 时设置 |
-| `XIANYU_JWT_EXPIRES_MINUTES` | `10080` | 后台登录有效期，单位分钟 |
+| `XIANYU_ACCESS_TOKEN_EXPIRES_MINUTES` | `1440` | 管理员访问令牌有效期；前端会在到期前自动刷新 |
+| `XIANYU_ADMIN_SESSION_EXPIRES_DAYS` | `365` | 管理员滑动登录会话有效期；正常使用会自动顺延 |
 | `XIANYU_TRUSTED_PROXY_IPS` | `127.0.0.1,::1` | 可信直接反向代理列表 |
 | `XIANYU_IM_VERIFICATION_ALLOW_NO_SANDBOX` | `false` | 隔离的 Root 开发环境运行 Chromium 时使用 |
 

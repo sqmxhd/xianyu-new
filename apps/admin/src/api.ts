@@ -95,6 +95,19 @@ import type {
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+export const ADMIN_SESSION_EXPIRED_EVENT = "xianyu:admin-session-expired";
+const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS = 2 * 60 * 60;
+const AUTH_NO_REFRESH_PATHS = new Set([
+  "/api/auth/setup-status",
+  "/api/auth/client-info",
+  "/api/auth/login",
+  "/api/auth/bootstrap",
+  "/api/auth/refresh",
+  "/api/auth/logout"
+]);
+
+let refreshAdminSessionPromise: Promise<AuthToken | null | undefined> | null = null;
+let sessionExpiredEventDispatched = false;
 
 export class ApiRequestError extends Error {
   status: number;
@@ -125,6 +138,7 @@ export function getStoredAccessToken(): string {
 export function setStoredAccessToken(token: string): void {
   if (typeof window !== "undefined") {
     window.localStorage.setItem("xianyu_access_token", token);
+    sessionExpiredEventDispatched = false;
   }
 }
 
@@ -134,27 +148,126 @@ export function clearStoredAccessToken(): void {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const accessToken = getStoredAccessToken();
+function dispatchAdminSessionExpired(): void {
+  if (typeof window === "undefined" || sessionExpiredEventDispatched) return;
+  sessionExpiredEventDispatched = true;
+  window.dispatchEvent(new CustomEvent(ADMIN_SESSION_EXPIRED_EVENT));
+}
+
+function accessTokenExpiresSoon(token: string): boolean {
+  try {
+    const encodedPayload = token.split(".")[1];
+    if (!encodedPayload) return true;
+    const normalized = encodedPayload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const payload = JSON.parse(window.atob(padded)) as { exp?: number };
+    return !payload.exp || payload.exp - Math.floor(Date.now() / 1000) <= ACCESS_TOKEN_REFRESH_WINDOW_SECONDS;
+  } catch {
+    return true;
+  }
+}
+
+async function parseResponseError(response: Response): Promise<unknown> {
+  let detail: unknown = response.statusText;
+  try {
+    const body = await response.json();
+    detail = body.detail ?? detail;
+  } catch {
+    // Keep HTTP status text.
+  }
+  return detail;
+}
+
+async function renewAdminSession(): Promise<AuthToken | null | undefined> {
+  if (refreshAdminSessionPromise) return refreshAdminSessionPromise;
+  refreshAdminSessionPromise = (async () => {
+    const response = await fetch(`${API_BASE}/api/auth/refresh`, {
+      method: "POST",
+      credentials: "include"
+    });
+    if (response.status === 401) {
+      clearStoredAccessToken();
+      dispatchAdminSessionExpired();
+      return null;
+    }
+    if (!response.ok) return undefined;
+    const result = await response.json() as AuthToken;
+    setStoredAccessToken(result.access_token);
+    return result;
+  })().catch(() => undefined).finally(() => {
+    refreshAdminSessionPromise = null;
+  });
+  return refreshAdminSessionPromise;
+}
+
+export function restoreAdminSession(): Promise<AuthToken | null | undefined> {
+  return renewAdminSession();
+}
+
+export async function refreshAdminSessionIfNeeded(): Promise<boolean> {
+  const token = getStoredAccessToken();
+  if (token && !accessTokenExpiresSoon(token)) return true;
+  return Boolean(await renewAdminSession());
+}
+
+async function performFetch(
+  path: string,
+  init: RequestInit | undefined,
+  accessToken: string
+): Promise<Response> {
   const isFormData = init?.body instanceof FormData;
-  const response = await fetch(`${API_BASE}${path}`, {
+  return fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       ...(!isFormData ? { "Content-Type": "application/json" } : {}),
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...(init?.headers ?? {})
     }
   });
+}
+
+async function authenticatedFetch(path: string, init?: RequestInit): Promise<Response> {
+  const allowRefresh = !AUTH_NO_REFRESH_PATHS.has(path);
+  let accessToken = getStoredAccessToken();
+  let refreshAttempted = false;
+  let refreshRejectedSession = false;
+  let refreshSucceeded = false;
+  if (allowRefresh && (!accessToken || accessTokenExpiresSoon(accessToken))) {
+    refreshAttempted = true;
+    const refreshed = await renewAdminSession();
+    if (refreshed) {
+      accessToken = refreshed.access_token;
+      refreshSucceeded = true;
+    }
+    refreshRejectedSession = refreshed === null;
+  }
+
+  let response = await performFetch(path, init, accessToken);
+  if (allowRefresh && response.status === 401 && !refreshAttempted) {
+    const refreshed = await renewAdminSession();
+    if (refreshed) {
+      refreshSucceeded = true;
+      response = await performFetch(path, init, refreshed.access_token);
+    }
+    refreshRejectedSession = refreshed === null;
+  }
+  if (
+    allowRefresh &&
+    response.status === 401 &&
+    (refreshRejectedSession || refreshSucceeded)
+  ) {
+    clearStoredAccessToken();
+    dispatchAdminSessionExpired();
+  }
+  return response;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await authenticatedFetch(path, init);
 
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body = await response.json();
-      detail = body.detail ?? detail;
-    } catch {
-      // Keep HTTP status text.
-    }
-    throw new ApiRequestError(response.status, detail);
+    throw new ApiRequestError(response.status, await parseResponseError(response));
   }
 
   if (response.status === 204) {
@@ -165,19 +278,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function requestBlob(path: string): Promise<Blob> {
-  const accessToken = getStoredAccessToken();
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
-  });
+  const response = await authenticatedFetch(path);
   if (!response.ok) {
-    let detail: unknown = response.statusText;
-    try {
-      const body = await response.json();
-      detail = body.detail ?? detail;
-    } catch {
-      // Keep HTTP status text.
-    }
-    throw new ApiRequestError(response.status, detail);
+    throw new ApiRequestError(response.status, await parseResponseError(response));
   }
   return response.blob();
 }
@@ -337,6 +440,14 @@ export function loginWithPassword(values: Required<Pick<LoginFormValues, "userna
   });
 }
 
+export async function logoutAdminSession(): Promise<void> {
+  try {
+    await request<void>("/api/auth/logout", { method: "POST" });
+  } finally {
+    clearStoredAccessToken();
+  }
+}
+
 export function bootstrapAdminUser(
   values: Required<Pick<LoginFormValues, "username" | "password">>
 ): Promise<AuthToken> {
@@ -463,26 +574,14 @@ export async function exportAccountMigration(
   accountId: string,
   password: string
 ): Promise<{ blob: Blob; filename: string }> {
-  const accessToken = getStoredAccessToken();
   const body = new FormData();
   body.append("password", password);
-  const response = await fetch(
-    `${API_BASE}/api/account-migrations/export/${encodeURIComponent(accountId)}`,
-    {
-      method: "POST",
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
-      body
-    }
+  const response = await authenticatedFetch(
+    `/api/account-migrations/export/${encodeURIComponent(accountId)}`,
+    { method: "POST", body }
   );
   if (!response.ok) {
-    let detail: unknown = response.statusText;
-    try {
-      const result = await response.json();
-      detail = result.detail ?? detail;
-    } catch {
-      // Keep HTTP status text.
-    }
-    throw new ApiRequestError(response.status, detail);
+    throw new ApiRequestError(response.status, await parseResponseError(response));
   }
   const disposition = response.headers.get("content-disposition") ?? "";
   const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
@@ -1279,8 +1378,8 @@ function productDraftBody(values: ProductDraftFormValues) {
     .map((item) => item.trim())
     .filter(Boolean);
   return {
-    title: values.title,
-    description: values.description ?? "",
+    title: values.title?.trim() ?? "",
+    description: values.description?.trim() ?? "",
     price: values.price,
     original_price: values.original_price || null,
     stock: values.stock,
@@ -1482,6 +1581,21 @@ export function deleteProductDraft(accountId: string, draftId: string): Promise<
 
 export function listProductPublishTasks(accountId: string, limit = 100): Promise<ProductPublishTask[]> {
   return request<ProductPublishTask[]>(`/api/accounts/${accountId}/products/publish-tasks?limit=${limit}`);
+}
+
+export function listProductPublishTaskAttempts(
+  accountId: string,
+  taskId: string
+): Promise<ProductPublishTask[]> {
+  return request<ProductPublishTask[]>(
+    `/api/accounts/${accountId}/products/publish-tasks/${taskId}/attempts`
+  );
+}
+
+export function hideProductPublishTask(accountId: string, taskId: string): Promise<void> {
+  return request<void>(`/api/accounts/${accountId}/products/publish-tasks/${taskId}`, {
+    method: "DELETE"
+  });
 }
 
 export function createProductPublishTask(

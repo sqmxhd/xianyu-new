@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.api.xianyu_admin_api.database import Base
+from apps.api.xianyu_admin_api.database import Base, _backfill_product_publish_retry_visibility
 from apps.api.xianyu_admin_api.product_images import ProductImageStorage
 from apps.api.xianyu_admin_api.product_image_archives import (
     ProductImageArchiveError,
@@ -49,6 +49,7 @@ from apps.api.xianyu_admin_api.schemas import (
 from apps.api.xianyu_admin_api.store import AccountStore
 from apps.api.xianyu_admin_api.orm import (
     ProductLocationCacheORM,
+    ProductPublishTaskORM,
     ProductPublishTaskAssetORM,
     PublishAddressUsageORM,
 )
@@ -193,6 +194,40 @@ class ProductPublisherTests(unittest.TestCase):
             delivery_choice="free_shipping",
             unique_code="123456789012345678",
         )
+
+    def test_title_and_description_can_both_be_empty(self):
+        request = replace(self.make_request(), title="", description="")
+
+        MtopProductPublisher._validate_request(request)
+
+        platform = FakeSession()
+        publisher = MtopProductPublisher(
+            AccountConfig(account_id="account-1", cookie="unb=10001; _m_h5_tk=oldtoken_1"),
+            session_factory=lambda: platform,
+            sign_handler=lambda *_args: "sign",
+        )
+        try:
+            payload = publisher._build_publish_payload(
+                request,
+                [PublishedImage(url="https://img.alicdn.com/first.jpg", width=32, height=24)],
+                {},
+                {"channelCatId": "2"},
+                {
+                    "prov": "浙江省",
+                    "city": "杭州市",
+                    "area": "西湖区",
+                    "division_id": "330106",
+                    "longitude": 120.1,
+                    "latitude": 30.2,
+                    "poi_id": "poi-hz",
+                    "poi_name": "西湖区",
+                },
+            )
+        finally:
+            publisher.close()
+
+        self.assertEqual(payload["itemTextDTO"]["title"], "")
+        self.assertEqual(payload["itemTextDTO"]["desc"], "")
 
     def test_publish_payload_uses_first_image_as_main_and_forces_pickup_only(self):
         platform = FakeSession()
@@ -685,6 +720,51 @@ class ProductPublishStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.snapshot["post_price"], "5.00")
         self.assertEqual(first.snapshot["location"]["division_id"], "330106")
 
+    async def test_blank_title_and_description_are_preserved_and_can_be_cleared(self):
+        blank = await self.store.create_product_draft(
+            self.account.account_id,
+            ProductDraftCreatePayload(
+                price="10",
+                images=["https://example.com/blank.jpg"],
+            ),
+        )
+        assert blank is not None
+        self.assertEqual(blank.title, "")
+        self.assertEqual(blank.description, "")
+
+        populated = await self.store.create_product_draft(
+            self.account.account_id,
+            ProductDraftCreatePayload(
+                title="待清空标题",
+                description="待清空描述",
+                price="10",
+                images=["https://example.com/populated.jpg"],
+            ),
+        )
+        assert populated is not None
+        cleared = await self.store.update_product_draft(
+            self.account.account_id,
+            populated.draft_id,
+            ProductDraftUpdatePayload(title="   ", description="   "),
+        )
+        assert cleared is not None
+        self.assertEqual(cleared.title, "")
+        self.assertEqual(cleared.description, "")
+
+        request = await _request_from_snapshot(
+            self.store,
+            self.account.account_id,
+            {
+                "title": "只有标题",
+                "description": "",
+                "price": "10",
+                "images": [],
+            },
+            "123456789012345678",
+        )
+        self.assertEqual(request.title, "只有标题")
+        self.assertEqual(request.description, "")
+
     async def test_direct_publish_job_retains_assets_without_creating_draft(self):
         raw = jpeg_bytes()
         asset = await self.store.create_product_image_asset(
@@ -787,6 +867,66 @@ class ProductPublishStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retried.attempt_no, 2)
         self.assertEqual(retried.snapshot["title"], source.snapshot["title"])
         self.assertNotEqual(retried.snapshot["unique_code"], source.snapshot["unique_code"])
+        visible = await self.store.list_product_publish_tasks(self.account.account_id)
+        self.assertEqual([item.task_id for item in visible], [retried.task_id])
+        attempts = await self.store.list_product_publish_task_attempts(
+            self.account.account_id,
+            retried.task_id,
+        )
+        assert attempts is not None
+        self.assertEqual([item.task_id for item in attempts], [source.task_id, retried.task_id])
+        with self.session_factory() as session:
+            source_row = session.get(ProductPublishTaskORM, source.task_id)
+            assert source_row is not None
+            self.assertIsNotNone(source_row.catalog_hidden_at)
+            source_row.catalog_hidden_at = None
+            session.commit()
+        _backfill_product_publish_retry_visibility(self.engine)
+        with self.session_factory() as session:
+            source_row = session.get(ProductPublishTaskORM, source.task_id)
+            assert source_row is not None
+            self.assertIsNotNone(source_row.catalog_hidden_at)
+
+        repeated = await self.store.retry_product_publish_task(
+            self.account.account_id,
+            source.task_id,
+            ProductPublishRetryPayload(idempotency_key="retry-attempt-request"),
+        )
+        assert repeated is not None
+        self.assertEqual(repeated.task_id, retried.task_id)
+        with self.assertRaisesRegex(ValueError, "已有后续尝试"):
+            await self.store.retry_product_publish_task(
+                self.account.account_id,
+                source.task_id,
+                ProductPublishRetryPayload(idempotency_key="another-retry-request"),
+            )
+
+        with self.assertRaisesRegex(ValueError, "仅发布失败"):
+            await self.store.hide_product_publish_task(
+                self.account.account_id,
+                retried.task_id,
+            )
+        retried = await self.store.update_product_publish_task_after_execute(
+            account_id=self.account.account_id,
+            task_id=retried.task_id,
+            status="failed",
+            phase="failed",
+            failure_kind="network",
+            error="timeout again",
+            retryable=True,
+            result_certainty="confirmed_failed",
+        )
+        assert retried is not None
+        self.assertTrue(
+            await self.store.hide_product_publish_task(
+                self.account.account_id,
+                retried.task_id,
+            )
+        )
+        self.assertEqual(
+            await self.store.list_product_publish_tasks(self.account.account_id),
+            [],
+        )
 
     async def test_abandoned_upload_session_is_cleaned(self):
         raw = jpeg_bytes()

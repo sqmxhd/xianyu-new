@@ -36,6 +36,7 @@ from .database import SessionLocal, init_database
 from .executors import run_db_blocking
 from .orm import (
     AIProviderSettingORM,
+    AdminSessionORM,
     AccountBrowserIdentityORM,
     AccountORM,
     AuditLogORM,
@@ -162,7 +163,13 @@ from .schemas import (
     UserUpdatePayload,
 )
 from .product_regions import product_region_catalog
-from .security import hash_password, verify_password
+from .security import (
+    generate_admin_session_token,
+    hash_admin_session_token,
+    hash_password,
+    verify_password,
+)
+from .settings import settings
 from .sensitive import decrypt_sensitive, encrypt_sensitive
 
 
@@ -602,6 +609,47 @@ class AccountStore:
 
     async def get_user(self, user_id: str) -> UserPayload | None:
         return await run_db_blocking(self._get_user_sync, user_id)
+
+    async def create_admin_session(
+        self,
+        user_id: str,
+        *,
+        client_ip: str | None = None,
+        login_source: str | None = None,
+    ) -> tuple[str, str] | None:
+        async with self._resource_write_lock("admin-session", user_id):
+            return await run_db_blocking(
+                self._create_admin_session_sync,
+                user_id,
+                client_ip,
+                login_source,
+            )
+
+    async def refresh_admin_session(
+        self,
+        refresh_token: str,
+    ) -> tuple[UserPayload, str] | None:
+        return await run_db_blocking(
+            self._refresh_admin_session_sync,
+            refresh_token,
+        )
+
+    async def revoke_admin_session(self, refresh_token: str) -> bool:
+        return await run_db_blocking(
+            self._revoke_admin_session_sync,
+            refresh_token,
+        )
+
+    async def get_user_for_admin_session(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> UserPayload | None:
+        return await run_db_blocking(
+            self._get_user_for_admin_session_sync,
+            user_id,
+            session_id,
+        )
 
     async def list_quick_phrases(self, user_id: str) -> list[QuickPhrasePayload]:
         return await run_db_blocking(self._list_quick_phrases_sync, user_id)
@@ -2322,6 +2370,29 @@ class AccountStore:
                 payload,
             )
 
+    async def list_product_publish_task_attempts(
+        self,
+        account_id: str,
+        task_id: str,
+    ) -> list[ProductPublishTaskPayload] | None:
+        return await run_db_blocking(
+            self._list_product_publish_task_attempts_sync,
+            account_id,
+            task_id,
+        )
+
+    async def hide_product_publish_task(
+        self,
+        account_id: str,
+        task_id: str,
+    ) -> bool | None:
+        async with self._account_write_lock(account_id):
+            return await run_db_blocking(
+                self._hide_product_publish_task_sync,
+                account_id,
+                task_id,
+            )
+
     async def update_product_publish_task_after_execute(
         self,
         *,
@@ -2410,6 +2481,121 @@ class AccountStore:
             row = session.get(UserORM, user_id)
             return self._user_to_payload(row) if row is not None else None
 
+    def _create_admin_session_sync(
+        self,
+        user_id: str,
+        client_ip: str | None,
+        login_source: str | None,
+    ) -> tuple[str, str] | None:
+        now = utcnow()
+        refresh_token, token_hash = generate_admin_session_token()
+        with self._session_factory() as session:
+            user = session.get(UserORM, user_id)
+            if user is None or not user.enabled:
+                return None
+            session.execute(
+                sql_delete(AdminSessionORM).where(
+                    or_(
+                        AdminSessionORM.expires_at <= now,
+                        and_(
+                            AdminSessionORM.revoked_at.is_not(None),
+                            AdminSessionORM.revoked_at <= now - timedelta(days=30),
+                        ),
+                    )
+                )
+            )
+            session_id = uuid.uuid4().hex
+            session.add(
+                AdminSessionORM(
+                    session_id=session_id,
+                    user_id=user_id,
+                    refresh_token_hash=token_hash,
+                    created_at=now,
+                    updated_at=now,
+                    last_used_at=now,
+                    expires_at=now + timedelta(days=settings.admin_session_expires_days),
+                    client_ip=client_ip,
+                    login_source=login_source,
+                )
+            )
+            session.commit()
+            return session_id, refresh_token
+
+    def _refresh_admin_session_sync(
+        self,
+        refresh_token: str,
+    ) -> tuple[UserPayload, str] | None:
+        normalized = refresh_token.strip()
+        if not normalized:
+            return None
+        now = utcnow()
+        token_hash = hash_admin_session_token(normalized)
+        with self._session_factory() as session:
+            admin_session = session.scalar(
+                select(AdminSessionORM)
+                .where(AdminSessionORM.refresh_token_hash == token_hash)
+                .with_for_update()
+            )
+            if (
+                admin_session is None
+                or admin_session.revoked_at is not None
+                or admin_session.expires_at <= now
+            ):
+                return None
+            user = session.get(UserORM, admin_session.user_id)
+            if user is None or not user.enabled:
+                admin_session.revoked_at = now
+                admin_session.updated_at = now
+                session.commit()
+                return None
+            admin_session.last_used_at = now
+            admin_session.updated_at = now
+            admin_session.expires_at = now + timedelta(
+                days=settings.admin_session_expires_days
+            )
+            session.commit()
+            return self._user_to_payload(user), admin_session.session_id
+
+    def _revoke_admin_session_sync(self, refresh_token: str) -> bool:
+        normalized = refresh_token.strip()
+        if not normalized:
+            return False
+        now = utcnow()
+        with self._session_factory() as session:
+            admin_session = session.scalar(
+                select(AdminSessionORM).where(
+                    AdminSessionORM.refresh_token_hash
+                    == hash_admin_session_token(normalized)
+                )
+            )
+            if admin_session is None:
+                return False
+            if admin_session.revoked_at is None:
+                admin_session.revoked_at = now
+                admin_session.updated_at = now
+                session.commit()
+            return True
+
+    def _get_user_for_admin_session_sync(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> UserPayload | None:
+        now = utcnow()
+        with self._session_factory() as session:
+            admin_session = session.get(AdminSessionORM, session_id)
+            if (
+                admin_session is None
+                or admin_session.user_id != user_id
+                or admin_session.revoked_at is not None
+                or admin_session.expires_at <= now
+            ):
+                return None
+            user = session.get(UserORM, user_id)
+            if user is None or not user.enabled:
+                return None
+            return self._user_to_payload(user)
+
     def _create_user_sync(self, payload: UserCreatePayload) -> UserPayload:
         now = utcnow()
         normalized_username = payload.username.strip()
@@ -2433,6 +2619,7 @@ class AccountStore:
             return self._user_to_payload(row)
 
     def _update_user_sync(self, user_id: str, payload: UserUpdatePayload) -> UserPayload | None:
+        now = utcnow()
         with self._session_factory() as session:
             row = session.get(UserORM, user_id)
             if row is None:
@@ -2443,7 +2630,16 @@ class AccountStore:
                 row.role = payload.role
             if payload.enabled is not None:
                 row.enabled = payload.enabled
-            row.updated_at = utcnow()
+            if payload.password is not None or payload.enabled is False:
+                session.execute(
+                    update(AdminSessionORM)
+                    .where(
+                        AdminSessionORM.user_id == user_id,
+                        AdminSessionORM.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=now, updated_at=now)
+                )
+            row.updated_at = now
             session.commit()
             return self._user_to_payload(row)
 
@@ -9252,10 +9448,18 @@ class AccountStore:
                 )
             )
             if existing is not None:
+                if existing.retry_of_task_id != task_id:
+                    raise ValueError("该重试请求标识已被其他发布任务使用")
                 return self._product_publish_task_to_payload(existing)
-            source = session.get(ProductPublishTaskORM, task_id)
+            source = session.scalar(
+                select(ProductPublishTaskORM)
+                .where(ProductPublishTaskORM.task_id == task_id)
+                .with_for_update()
+            )
             if source is None or source.account_id != account_id:
                 return None
+            if source.catalog_hidden_at is not None:
+                raise ValueError("该发布任务已有后续尝试或已从列表移除")
             legacy_retryable = source.retryable is None and source.failure_kind == "network"
             if source.status != "failed" or not (source.retryable or legacy_retryable):
                 raise ValueError("该发布任务不允许直接重试，请先查看失败原因")
@@ -9301,6 +9505,11 @@ class AccountStore:
                 updated_at=now,
             )
             session.add(row)
+            # A retry is another attempt of the same logical publish job. Keep
+            # the source row for audit/history, but replace it in the catalog
+            # atomically so users never see two independent publish jobs.
+            source.catalog_hidden_at = now
+            source.updated_at = now
             session.flush()
             retain_until = now + timedelta(days=30)
             for ordinal, asset in enumerate(assets):
@@ -9318,6 +9527,69 @@ class AccountStore:
                 )
             session.commit()
             return self._product_publish_task_to_payload(row)
+
+    def _list_product_publish_task_attempts_sync(
+        self,
+        account_id: str,
+        task_id: str,
+    ) -> list[ProductPublishTaskPayload] | None:
+        with self._session_factory() as session:
+            selected = session.get(ProductPublishTaskORM, task_id)
+            if selected is None or selected.account_id != account_id:
+                return None
+
+            rows = list(
+                session.scalars(
+                    select(ProductPublishTaskORM)
+                    .where(ProductPublishTaskORM.account_id == account_id)
+                    .order_by(
+                        ProductPublishTaskORM.created_at.asc(),
+                        ProductPublishTaskORM.task_id.asc(),
+                    )
+                ).all()
+            )
+            by_id = {row.task_id: row for row in rows}
+            root_id = selected.task_id
+            visited: set[str] = set()
+            while root_id not in visited:
+                visited.add(root_id)
+                parent_id = by_id.get(root_id).retry_of_task_id if by_id.get(root_id) else None
+                if not parent_id or parent_id not in by_id:
+                    break
+                root_id = parent_id
+
+            chain_ids = {root_id}
+            changed = True
+            while changed:
+                changed = False
+                for row in rows:
+                    if row.retry_of_task_id in chain_ids and row.task_id not in chain_ids:
+                        chain_ids.add(row.task_id)
+                        changed = True
+            attempts = [row for row in rows if row.task_id in chain_ids]
+            attempts.sort(key=lambda row: (row.attempt_no or 1, row.created_at, row.task_id))
+            return [self._product_publish_task_to_payload(row) for row in attempts]
+
+    def _hide_product_publish_task_sync(
+        self,
+        account_id: str,
+        task_id: str,
+    ) -> bool | None:
+        now = utcnow()
+        with self._session_factory() as session:
+            row = session.get(ProductPublishTaskORM, task_id)
+            if row is None or row.account_id != account_id:
+                return None
+            if row.catalog_hidden_at is not None:
+                return True
+            if row.status not in {"failed", "cancelled"}:
+                raise ValueError("仅发布失败或已取消的任务可以从列表移除")
+            if row.result_certainty in {"published_unconfirmed", "result_unknown"}:
+                raise ValueError("发布结果尚未确认，不能移除；请先执行核检")
+            row.catalog_hidden_at = now
+            row.updated_at = now
+            session.commit()
+            return True
 
     def _update_product_publish_task_after_execute_sync(
         self,

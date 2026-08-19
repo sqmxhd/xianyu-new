@@ -745,8 +745,6 @@ class MtopProductPublisher:
 
     @staticmethod
     def _validate_request(request: ProductPublishRequest) -> None:
-        if not request.title.strip() or not request.description.strip():
-            raise ProductPublishError("validation", "商品标题和描述不能为空")
         if not 1 <= len(request.image_urls) <= 9:
             raise ProductPublishError("validation", "商品图片数量必须为 1 到 9 张")
         if not request.unique_code:

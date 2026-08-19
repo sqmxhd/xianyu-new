@@ -416,7 +416,7 @@ async def _request_from_snapshot(
         )
     return ProductPublishRequest(
         title=str(snapshot.get("title") or "").strip(),
-        description=str(snapshot.get("description") or snapshot.get("title") or "").strip(),
+        description=str(snapshot.get("description") or "").strip(),
         image_urls=image_refs,
         price=_decimal(snapshot.get("price"), required=True),
         original_price=_decimal(snapshot.get("original_price")),

@@ -189,6 +189,8 @@ import {
   listProductLocations,
   listProductRegions,
   listProductPublishTasks,
+  listProductPublishTaskAttempts,
+  hideProductPublishTask,
   retryProductPublishTask,
   listProductManagementAccounts,
   listManagedProducts,
@@ -253,6 +255,7 @@ import {
   completeIMVerification,
   cancelIMVerification,
   ApiRequestError,
+  ADMIN_SESSION_EXPIRED_EVENT,
   bootstrapAdminUser,
   clearStoredAccessToken,
   enqueueDeliveryRecord,
@@ -264,8 +267,11 @@ import {
   listSystemUsers,
   listRuntimeHealth,
   loginWithPassword,
+  logoutAdminSession,
   markConversationRead,
   setStoredAccessToken,
+  restoreAdminSession,
+  refreshAdminSessionIfNeeded,
   pasteAccountBrowserText,
   touchAccountBrowserSession,
   touchQuickPhrase,
@@ -1990,6 +1996,7 @@ export default function App() {
   const [productShippingOpen, setProductShippingOpen] = useState(false);
   const [productShippingError, setProductShippingError] = useState<string | null>(null);
   const [productRetryingTaskId, setProductRetryingTaskId] = useState<string | null>(null);
+  const [productRemovingTaskId, setProductRemovingTaskId] = useState<string | null>(null);
   const [productManagerAccounts, setProductManagerAccounts] = useState<ProductAccountSummary[]>([]);
   const [productManagerAccountId, setProductManagerAccountId] = useState<string | null>(null);
   const [managedProducts, setManagedProducts] = useState<ManagedProductItem[]>([]);
@@ -2056,6 +2063,10 @@ export default function App() {
       | "polish_jitter_minutes"
     >
   >();
+  const productScheduledSyncEnabled =
+    Form.useWatch("sync_enabled", productSyncSettingForm) ?? false;
+  const productAutoPolishEnabled =
+    Form.useWatch("auto_polish_enabled", productSyncSettingForm) ?? false;
   const [addressGroupForm] = Form.useForm<PublishAddressGroupFormValues>();
   const [addressImportForm] = Form.useForm<AddressImportFormValues>();
   const ruleTriggerType = Form.useWatch("trigger_type", ruleForm) ?? "keyword";
@@ -2385,8 +2396,11 @@ export default function App() {
       setClientAccess(setupStatus.client);
 
       if (!getStoredAccessToken()) {
-        setAuthenticated(false);
-        return;
+        const restored = await restoreAdminSession();
+        if (!restored) {
+          setAuthenticated(false);
+          return;
+        }
       }
 
       const [ok, user] = await Promise.all([
@@ -2467,14 +2481,34 @@ export default function App() {
     setAuthenticated(false);
     setCurrentUser(null);
     setAccounts([]);
+    setProxies([]);
+    setUsers([]);
+    setConversations([]);
+    setChatMessages([]);
+    setOrders([]);
+    setManagedProducts([]);
+    setProductTasks([]);
+    setBackgroundTasks([]);
+    setAuditLogs([]);
     setProcessHealth(null);
     setRuntimeHealth([]);
+    setDrawerOpen(false);
+    setUserDrawerOpen(false);
+    setProxyDrawerOpen(false);
+    setMobileNavOpen(false);
+    setProductPublishDrawerOpen(false);
     loginForm.setFieldsValue({ username: "", password: "" });
   }
 
-  function logout() {
-    clearAuthenticatedSession();
-    message.success("已退出登录");
+  async function logout() {
+    try {
+      await logoutAdminSession();
+    } catch {
+      // Local logout must still complete if the API is temporarily unavailable.
+    } finally {
+      clearAuthenticatedSession();
+      message.success("已退出登录");
+    }
   }
 
   function privacyAllowsSensitiveEditor(): boolean {
@@ -2512,9 +2546,37 @@ export default function App() {
   }
 
   useEffect(() => {
+    const handleSessionExpired = () => {
+      const shouldNotify = authenticated;
+      clearAuthenticatedSession();
+      if (shouldNotify) {
+        message.warning("登录已过期，请重新登录");
+      }
+    };
+    window.addEventListener(ADMIN_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(ADMIN_SESSION_EXPIRED_EVENT, handleSessionExpired);
+  }, [authenticated]);
+
+  useEffect(() => {
     loginForm.setFieldsValue({ username: "", password: "" });
     void bootstrapAuth();
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") {
+        void refreshAdminSessionIfNeeded();
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 30 * 60 * 1000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [authenticated]);
 
   useEffect(() => {
     if (!authenticated || !["dashboard", "accounts"].includes(activeMenu)) {
@@ -3254,12 +3316,24 @@ export default function App() {
           if (event.event === "product_publish_task_upsert" && event.account_id && event.data) {
             const next = event.data as ProductPublishTask;
             if (event.account_id === productManagerAccountIdRef.current) {
-              setProductTasks((items) => [next, ...items.filter((item) => item.task_id !== next.task_id)]);
+              setProductTasks((items) => [
+                next,
+                ...items.filter(
+                  (item) => item.task_id !== next.task_id && item.task_id !== next.retry_of_task_id
+                )
+              ]);
               if (next.status === "success" || next.status === "verification_required") {
                 window.setTimeout(() => {
                   void loadProductManagementWorkspace(event.account_id, true);
                 }, 800);
               }
+            }
+            return;
+          }
+          if (event.event === "product_publish_task_removed" && event.account_id && event.data) {
+            const taskId = String((event.data as { task_id?: string }).task_id || "");
+            if (taskId && event.account_id === productManagerAccountIdRef.current) {
+              setProductTasks((items) => items.filter((item) => item.task_id !== taskId));
             }
             return;
           }
@@ -7290,7 +7364,11 @@ export default function App() {
       delete productPublishRequestIdsRef.current[requestKey];
       setProductTasks((items) => [
         result.publish_task,
-        ...items.filter((item) => item.task_id !== result.publish_task.task_id)
+        ...items.filter(
+          (item) =>
+            item.task_id !== result.publish_task.task_id &&
+            item.task_id !== result.publish_task.retry_of_task_id
+        )
       ]);
       try {
         await cleanupProductUploadSession(productAccount.account_id, productUploadSessionId);
@@ -7368,6 +7446,78 @@ export default function App() {
     } finally {
       setProductRetryingTaskId(null);
     }
+  }
+
+  async function showProductPublishTaskDetails(task: ProductPublishTask) {
+    if (!productManagerAccountId) return;
+    let attempts = [task];
+    try {
+      attempts = await listProductPublishTaskAttempts(productManagerAccountId, task.task_id);
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : "加载发布尝试记录失败");
+    }
+    const statusLabels: Record<ProductPublishTask["status"], string> = {
+      pending: "排队中",
+      running: "发布中",
+      success: "发布成功",
+      verification_required: "待核验",
+      failed: "发布失败",
+      cancelled: "已取消"
+    };
+    Modal.info({
+      title: "发布任务详情",
+      width: 700,
+      content: (
+        <Space direction="vertical" size={12} className="content-stack product-attempt-list">
+          <Text type="secondary">同一发布任务共执行 {attempts.length} 次，商品列表仅显示最新状态。</Text>
+          {attempts.map((attempt) => (
+            <div className="product-attempt-item" key={attempt.task_id}>
+              <div className="product-attempt-heading">
+                <Text strong>第 {attempt.attempt_no} 次 · {statusLabels[attempt.status]}</Text>
+                <Text type="secondary">{formatTime(attempt.created_at)}</Text>
+              </div>
+              <Text type="secondary" copyable={privacyMaskEnabled ? false : undefined}>
+                任务 ID：{privateId(attempt.task_id)}
+              </Text>
+              <Text type="secondary">执行阶段：{attempt.phase}</Text>
+              {attempt.failure_kind ? <Text type="secondary">错误类型：{attempt.failure_kind}</Text> : null}
+              {attempt.error ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={privacyMaskEnabled ? "错误详情已隐藏" : attempt.error}
+                />
+              ) : null}
+            </div>
+          ))}
+        </Space>
+      )
+    });
+  }
+
+  function confirmRemoveProductPublishTask(task: ProductPublishTask) {
+    if (!productManagerAccountId || productRemovingTaskId) return;
+    Modal.confirm({
+      title: "移除失败记录",
+      content: "仅从商品列表移除此失败记录，后台执行历史和审计数据仍会保留。确认继续？",
+      okText: "移除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      async onOk() {
+        if (!productManagerAccountId) return;
+        setProductRemovingTaskId(task.task_id);
+        try {
+          await hideProductPublishTask(productManagerAccountId, task.task_id);
+          setProductTasks((items) => items.filter((item) => item.task_id !== task.task_id));
+          message.success("失败记录已从商品列表移除");
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "移除失败记录失败");
+          throw error;
+        } finally {
+          setProductRemovingTaskId(null);
+        }
+      }
+    });
   }
 
   async function removeProductDraft(draft: ProductDraft) {
@@ -7720,6 +7870,16 @@ export default function App() {
       mergeSavedUser(savedUser);
       const currentSessionStillActive = getStoredAccessToken() === snapshot.accessToken;
       if (snapshot.targetUser?.user_id === currentUser?.user_id && currentSessionStillActive) {
+        if (snapshot.values.password) {
+          try {
+            await logoutAdminSession();
+          } catch {
+            // The backend already revoked sessions with the password change.
+          }
+          clearAuthenticatedSession();
+          message.success("密码已修改，请重新登录");
+          return;
+        }
         if (savedUser.enabled) {
           setCurrentUser(savedUser);
         } else {
@@ -11837,7 +11997,10 @@ export default function App() {
                 <span className="product-account-main">
                   <Text strong ellipsis title={accountDisplayName(account)}>{accountDisplayName(account)}</Text>
                   <span className="product-account-meta">
-                    <StatusTag state={account.runtime_state} />
+                    <span className={`product-account-runtime state-${account.runtime_state}`}>
+                      <span className="product-account-runtime-dot" />
+                      {runtimeStateLabel(account.runtime_state)}
+                    </span>
                     <Text type="secondary">在售 {account.selling_count}</Text>
                   </span>
                 </span>
@@ -11884,11 +12047,11 @@ export default function App() {
                     发布商品
                   </Button>
                   {latestRun ? (
-                    <Button type="text" onClick={() => setProductManagerHistoryOpen(true)}>
-                      {operationLabels[latestRun.operation]}
-                      <Tag color={runStatusMeta[latestRun.status].color} className="product-run-tag">
-                        {runStatusMeta[latestRun.status].label}
-                      </Tag>
+                    <Button type="text" icon={<HistoryOutlined />} onClick={() => setProductManagerHistoryOpen(true)}>
+                      任务记录
+                      <span className={`product-run-state state-${latestRun.status}`}>
+                        {operationLabels[latestRun.operation]} · {runStatusMeta[latestRun.status].label}
+                      </span>
                     </Button>
                   ) : (
                     <Button type="text" onClick={() => setProductManagerHistoryOpen(true)}>任务记录</Button>
@@ -12005,7 +12168,7 @@ export default function App() {
                           )}
                           <div className="managed-product-copy">
                             <Space size={6}>
-                              {entry.kind === "publish_task" ? <Tag>发布任务</Tag> : null}
+                              {entry.kind === "publish_task" ? <Text type="secondary">发布任务</Text> : null}
                               <Text ellipsis title={privateName(entry.title)}>
                                 {privateName(entry.title) || "未命名商品"}
                               </Text>
@@ -12029,7 +12192,13 @@ export default function App() {
                           const phase = entry.task.phase.startsWith("uploading_image:")
                             ? `上传图片 ${entry.task.phase.split(":")[1]}`
                             : publishPhaseLabels[entry.task.phase] || entry.task.phase;
-                          return <Space size={4}><Tag color={meta.color}>{meta.label}</Tag><Text type="secondary">{phase}</Text></Space>;
+                          const showPhase = ["pending", "running"].includes(entry.task.status);
+                          return (
+                            <Space size={4}>
+                              <Tag color={meta.color}>{meta.label}</Tag>
+                              {showPhase ? <Text type="secondary">{phase}</Text> : null}
+                            </Space>
+                          );
                         }
                         const item = entry.item!;
                         const meta = statusMeta[item.platform_status];
@@ -12038,7 +12207,7 @@ export default function App() {
                             <Tag color={meta.color}>{meta.label}</Tag>
                             {item.want_text ? (
                               <Tooltip title={`平台最近同步数据 · ${formatTime(item.last_synced_at)}`}>
-                                <Tag>{item.want_text}</Tag>
+                                <Text type="secondary">{item.want_text}</Text>
                               </Tooltip>
                             ) : null}
                             {item.sync_state === "pending_confirmation" ? (
@@ -12103,6 +12272,13 @@ export default function App() {
                                     disabled: task.status !== "failed" || !task.retryable
                                   },
                                   {
+                                    key: "remove",
+                                    danger: true,
+                                    icon: <DeleteOutlined />,
+                                    label: "移除失败记录",
+                                    disabled: !["failed", "cancelled"].includes(task.status)
+                                  },
+                                  {
                                     key: "sync",
                                     icon: <SyncOutlined />,
                                     label: "手动核检",
@@ -12112,30 +12288,9 @@ export default function App() {
                                 ],
                                 onClick: ({ key }) => {
                                   if (key === "retry") void retryFailedProductPublish(task);
+                                  if (key === "remove") confirmRemoveProductPublishTask(task);
                                   if (key === "sync" && productManagerAccountId) void runProductManagerSync(productManagerAccountId);
-                                  if (key === "details") {
-                                    Modal.info({
-                                      title: "发布任务详情",
-                                      width: 680,
-                                      content: (
-                                        <Space direction="vertical" size={8} className="content-stack">
-                                          <Text copyable={privacyMaskEnabled ? false : undefined}>
-                                            任务 ID：{privateId(task.task_id)}
-                                          </Text>
-                                          <Text>阶段：{publishPhaseLabels[task.phase] || task.phase}</Text>
-                                          <Text>尝试次数：{task.attempt_no}</Text>
-                                          {task.failure_kind ? <Text>错误类型：{task.failure_kind}</Text> : null}
-                                          {task.error ? (
-                                            <Alert
-                                              type="error"
-                                              showIcon
-                                              message={privacyMaskEnabled ? "错误详情已隐藏" : task.error}
-                                            />
-                                          ) : null}
-                                        </Space>
-                                      )
-                                    });
-                                  }
+                                  if (key === "details") void showProductPublishTaskDetails(task);
                                 }
                               }}
                             >
@@ -12143,7 +12298,10 @@ export default function App() {
                                 <Button
                                   type="text"
                                   icon={<MoreOutlined />}
-                                  loading={productRetryingTaskId === task.task_id}
+                                  loading={
+                                    productRetryingTaskId === task.task_id ||
+                                    productRemovingTaskId === task.task_id
+                                  }
                                   aria-label="发布任务更多操作"
                                 />
                               </Tooltip>
@@ -12243,7 +12401,9 @@ export default function App() {
         </Drawer>
 
         <Modal
+          className="product-setting-modal"
           title={`${selectedProductManagerAccount ? accountDisplayName(selectedProductManagerAccount) : "账户"} · 商品任务设置`}
+          width={compactLayout ? "calc(100vw - 24px)" : 660}
           open={productManagerSettingsOpen}
           confirmLoading={productManagerAction === "settings"}
           okText="保存"
@@ -12252,34 +12412,69 @@ export default function App() {
           onCancel={() => setProductManagerSettingsOpen(false)}
         >
           <Form form={productSyncSettingForm} layout="vertical" className="product-setting-form">
-            <Form.Item name="sync_enabled" label="定时同步" valuePropName="checked">
-              <Switch />
-            </Form.Item>
-            <Form.Item name="sync_interval_minutes" label="增量同步间隔（分钟）">
-              <InputNumber className="full-width" min={5} max={1440} />
-            </Form.Item>
-            <Form.Item name="sync_jitter_minutes" label="同步随机延迟（分钟）">
-              <InputNumber className="full-width" min={0} max={120} />
-            </Form.Item>
-            <Form.Item name="full_sync_interval_hours" label="全量同步间隔（小时）">
-              <InputNumber className="full-width" min={1} max={168} />
-            </Form.Item>
-            <Form.Item
-              name="publish_verify_delay_seconds"
-              label="发布后核检延迟（秒）"
-              tooltip="发布完成后等待平台列表更新，再自动核检一次；不会循环核检。"
-            >
-              <InputNumber className="full-width" min={10} max={300} />
-            </Form.Item>
-            <Form.Item name="auto_polish_enabled" label="自动擦亮" valuePropName="checked">
-              <Switch />
-            </Form.Item>
-            <Form.Item name="polish_hour" label="每日执行时段（北京时间）">
-              <InputNumber className="full-width" min={0} max={23} addonAfter="时" />
-            </Form.Item>
-            <Form.Item name="polish_jitter_minutes" label="擦亮随机延迟（分钟）">
-              <InputNumber className="full-width" min={0} max={180} />
-            </Form.Item>
+            <section className="product-setting-section">
+              <div className="product-setting-section-heading">
+                <div className="product-setting-copy">
+                  <Text strong>定时同步</Text>
+                  <Text type="secondary">定期更新在售、下架和删除状态。</Text>
+                </div>
+                <Form.Item name="sync_enabled" valuePropName="checked" noStyle>
+                  <Switch aria-label="启用定时同步" />
+                </Form.Item>
+              </div>
+              {productScheduledSyncEnabled ? (
+                <div className="product-setting-fields three-columns">
+                  <Form.Item name="sync_interval_minutes" label="增量间隔">
+                    <InputNumber min={5} max={1440} addonAfter="分钟" />
+                  </Form.Item>
+                  <Form.Item name="full_sync_interval_hours" label="全量间隔">
+                    <InputNumber min={1} max={168} addonAfter="小时" />
+                  </Form.Item>
+                  <Form.Item name="sync_jitter_minutes" label="随机延迟">
+                    <InputNumber min={0} max={120} addonAfter="分钟" />
+                  </Form.Item>
+                </div>
+              ) : null}
+            </section>
+
+            <section className="product-setting-section">
+              <div className="product-setting-copy">
+                <Text strong>发布核检</Text>
+                <Text type="secondary">发布完成后等待平台列表更新，再自动核检一次。</Text>
+              </div>
+              <div className="product-setting-fields single-control">
+                <Form.Item name="publish_verify_delay_seconds" label="核检延迟">
+                  <InputNumber min={10} max={300} addonAfter="秒" />
+                </Form.Item>
+              </div>
+            </section>
+
+            <section className="product-setting-section">
+              <div className="product-setting-section-heading">
+                <div className="product-setting-copy">
+                  <Text strong>自动擦亮</Text>
+                  <Text type="secondary">按北京时间每天执行一次，并加入随机延迟。</Text>
+                </div>
+                <Form.Item name="auto_polish_enabled" valuePropName="checked" noStyle>
+                  <Switch aria-label="启用自动擦亮" />
+                </Form.Item>
+              </div>
+              {productAutoPolishEnabled ? (
+                <div className="product-setting-fields two-columns">
+                  <Form.Item name="polish_hour" label="执行时间（北京时间）">
+                    <Select
+                      options={Array.from({ length: 24 }, (_, hour) => ({
+                        value: hour,
+                        label: `${String(hour).padStart(2, "0")}:00`
+                      }))}
+                    />
+                  </Form.Item>
+                  <Form.Item name="polish_jitter_minutes" label="随机延迟">
+                    <InputNumber min={0} max={180} addonAfter="分钟" />
+                  </Form.Item>
+                </div>
+              ) : null}
+            </section>
           </Form>
         </Modal>
 
@@ -12374,7 +12569,6 @@ export default function App() {
                 name="title"
                 className="product-wide-field"
                 label="商品标题"
-                rules={[{ required: true, message: "请输入商品标题" }]}
               >
                 <Input placeholder="商品标题" />
               </Form.Item>
@@ -12382,7 +12576,6 @@ export default function App() {
                 name="description"
                 className="product-wide-field"
                 label="商品描述"
-                rules={[{ required: true, message: "请输入商品描述" }]}
               >
                 <Input.TextArea
                   autoSize={{ minRows: 3, maxRows: 10 }}
@@ -14103,7 +14296,7 @@ export default function App() {
                 {maskSensitive(currentUser?.username, privacyMaskEnabled, "name")}
               </span>
             </Tooltip>
-            <Button icon={<LogoutOutlined />} onClick={logout} aria-label="退出登录" />
+            <Button icon={<LogoutOutlined />} onClick={() => void logout()} aria-label="退出登录" />
           </Space>
         </Header>
         <Content

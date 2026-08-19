@@ -57,6 +57,37 @@ class UserORM(Base):
     auto_reply_rules: Mapped[list["UserAutoReplyRuleORM"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    admin_sessions: Mapped[list["AdminSessionORM"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class AdminSessionORM(Base):
+    __tablename__ = "xianyu_admin_sessions"
+    __table_args__ = (
+        Index("ix_xianyu_admin_sessions_user", "user_id"),
+        Index("ix_xianyu_admin_sessions_token", "refresh_token_hash", unique=True),
+        Index("ix_xianyu_admin_sessions_expiry", "expires_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("xianyu_users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    refresh_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utcnow, onupdate=utcnow
+    )
+    last_used_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    login_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    user: Mapped["UserORM"] = relationship(back_populates="admin_sessions")
 
 
 class QuickPhraseORM(Base):

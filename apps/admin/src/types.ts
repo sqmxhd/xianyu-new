@@ -1155,8 +1155,8 @@ export interface ProductDraft {
 }
 
 export interface ProductDraftFormValues {
-  title: string;
-  description: string;
+  title?: string;
+  description?: string;
   price: string;
   original_price?: string | null;
   stock: number;

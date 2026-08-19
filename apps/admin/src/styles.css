@@ -3,8 +3,7 @@
   --ui-selected-bg: #d9d9d9;
   --ui-selected-hover-bg: #d0d0d0;
   --ui-hover-border: #bfbfbf;
-  --ui-selected-border: #595959;
-  --ui-selection-marker: #262626;
+  --ui-selected-border: #bfbfbf;
   --ui-focus-ring: #262626;
 }
 
@@ -1178,7 +1177,6 @@ body {
 .order-account-row.active {
   border-color: var(--ui-selected-border);
   background: var(--ui-selected-bg);
-  box-shadow: inset 3px 0 var(--ui-selection-marker);
 }
 
 .product-account-row.active:hover,
@@ -1218,6 +1216,39 @@ body {
   margin-inline-end: 0;
 }
 
+.product-account-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #595959;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.product-account-runtime-dot {
+  width: 7px;
+  height: 7px;
+  background: #8c8c8c;
+  border-radius: 50%;
+}
+
+.product-account-runtime.state-online .product-account-runtime-dot {
+  background: #52c41a;
+}
+
+.product-account-runtime.state-connecting .product-account-runtime-dot,
+.product-account-runtime.state-reconnecting .product-account-runtime-dot {
+  background: #1677ff;
+}
+
+.product-account-runtime.state-offline .product-account-runtime-dot,
+.product-account-runtime.state-auth_expired .product-account-runtime-dot,
+.product-account-runtime.state-risk_blocked .product-account-runtime-dot,
+.product-account-runtime.state-proxy_failed .product-account-runtime-dot,
+.product-account-runtime.state-error .product-account-runtime-dot {
+  background: #ff4d4f;
+}
+
 .product-catalog-pane,
 .order-catalog-pane {
   display: flex;
@@ -1240,8 +1271,16 @@ body {
   gap: 3px;
 }
 
-.product-run-tag {
-  margin-inline: 6px 0;
+.product-run-state {
+  margin-inline-start: 6px;
+  color: #8c8c8c;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.product-run-state.state-failed,
+.product-run-state.state-verification_required {
+  color: #cf1322;
 }
 
 .product-catalog-pane > .ant-alert,
@@ -1334,9 +1373,78 @@ body {
 }
 
 .product-setting-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.product-setting-section {
+  padding: 14px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.product-setting-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.product-setting-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.product-setting-fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 16px;
+  align-items: start;
+  gap: 0 12px;
+  margin-top: 12px;
+}
+
+.product-setting-fields.three-columns {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.product-setting-fields.two-columns {
+  grid-template-columns: repeat(2, minmax(0, 180px));
+}
+
+.product-setting-fields.single-control {
+  grid-template-columns: minmax(0, 180px);
+}
+
+.product-setting-fields .ant-form-item {
+  margin-bottom: 0;
+}
+
+.product-setting-fields .ant-input-number,
+.product-setting-fields .ant-select {
+  width: 100%;
+}
+
+.product-attempt-list {
+  margin-top: 12px;
+}
+
+.product-attempt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.product-attempt-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .product-image-preview img {
@@ -1653,7 +1761,6 @@ body {
 .conversation-item.active {
   border-color: var(--ui-selected-border);
   background: var(--ui-selected-bg);
-  box-shadow: inset 3px 0 var(--ui-selection-marker);
 }
 
 .conversation-item.active:hover {
@@ -2830,9 +2937,7 @@ body {
 
 .order-list-item.active {
   background: var(--ui-selected-bg);
-  box-shadow:
-    inset 3px 0 var(--ui-selection-marker),
-    inset 0 0 0 1px var(--ui-selected-border);
+  box-shadow: inset 0 0 0 1px var(--ui-selected-border);
 }
 
 .order-list-item.active:hover {
@@ -3140,9 +3245,18 @@ body {
     padding: 0 10px 10px;
   }
 
-  .product-setting-form,
   .order-setting-form {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .product-setting-fields.three-columns,
+  .product-setting-fields.two-columns,
+  .product-setting-fields.single-control {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .product-setting-section {
+    padding: 12px;
   }
 
   .page-toolbar,

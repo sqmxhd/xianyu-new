@@ -42,7 +42,14 @@ class Settings:
 
     database_url: str = required_env("XIANYU_DATABASE_URL")
     jwt_secret: str = required_env("XIANYU_JWT_SECRET")
-    jwt_expires_minutes: int = int(os.getenv("XIANYU_JWT_EXPIRES_MINUTES", "10080"))
+    access_token_expires_minutes: int = max(
+        5,
+        int(os.getenv("XIANYU_ACCESS_TOKEN_EXPIRES_MINUTES", "1440")),
+    )
+    admin_session_expires_days: int = max(
+        1,
+        int(os.getenv("XIANYU_ADMIN_SESSION_EXPIRES_DAYS", "365")),
+    )
     redis_url: str = required_env("XIANYU_REDIS_URL")
     api_health_url: str = os.getenv("XIANYU_API_HEALTH_URL", "http://127.0.0.1:8000/api/health")
     internal_api_url: str = os.getenv(
